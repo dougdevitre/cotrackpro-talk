@@ -32,18 +32,78 @@ import type {
   TwilioStartMessage,
   CoTrackProRole,
   CallSession,
+  TranscriptEntry,
 } from "../types/index.js";
-import { createSession, destroySession, getSession } from "../utils/sessions.js";
+import { createSession, destroySession, touchSession, onSessionDestroy } from "../utils/sessions.js";
 import { logger } from "../utils/logger.js";
 import { ElevenLabsStream } from "../services/elevenlabs.js";
 import { STTStream } from "../services/stt.js";
 import { streamResponse, sendToolResult } from "../services/anthropic.js";
 import { callMCPTool } from "../services/mcp.js";
+import {
+  createCallRecord,
+  completeCallRecord,
+  updateCallStatus,
+  appendToolCall,
+  maskPhoneNumber,
+} from "../services/dynamo.js";
+
+// ── Role-adaptive, trauma-informed greetings ─────────────────────────────────
+function getRoleGreeting(role: CoTrackProRole): string {
+  switch (role) {
+    case "kid_teen":
+      return (
+        "Hey there. Welcome to CoTrack Pro. " +
+        "This is a safe place where you can talk about what's going on. " +
+        "There are no wrong answers, and you can stop anytime you want. " +
+        "What's on your mind?"
+      );
+    case "parent":
+      return (
+        "Welcome to CoTrack Pro. I'm here to help with documentation, " +
+        "safety planning, and co-parenting support. " +
+        "Everything we talk about today is on your terms, and we can go at your pace. " +
+        "How can I help you today?"
+      );
+    case "attorney":
+    case "gal":
+    case "judge":
+      return (
+        "Welcome to CoTrack Pro. I'm ready to assist with documentation, " +
+        "case organization, and evidence support. " +
+        "How can I help you today?"
+      );
+    case "therapist":
+    case "social_worker":
+    case "school_counselor":
+      return (
+        "Welcome to CoTrack Pro. I'm here to support your documentation " +
+        "and help organize observations. " +
+        "What are you working on today?"
+      );
+    case "advocate":
+      return (
+        "Welcome to CoTrack Pro. I'm here to support your work " +
+        "with safety planning, documentation, and resource connection. " +
+        "How can I help today?"
+      );
+    default:
+      return (
+        "Welcome to CoTrack Pro. I'm here to help with documentation, " +
+        "safety planning, and co-parenting support. " +
+        "How can I help you today?"
+      );
+  }
+}
 
 // ── Sentence boundary detection for natural TTS pacing ──────────────────────
 // Matches a sentence-ending punctuation mark followed by whitespace.
 // Uses a lookbehind so the punctuation stays with the preceding sentence.
 const SENTENCE_END = /(?<=[.!?])\s+/;
+
+// If no sentence boundary arrives within this window, flush the buffer
+// to TTS anyway so the caller doesn't hear prolonged silence.
+const SENTENCE_FLUSH_TIMEOUT_MS = 500;
 
 /**
  * Handle a Twilio bidirectional media stream WebSocket connection.
@@ -57,17 +117,21 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
   let isAssistantSpeaking = false;
   let markCounter = 0;
   let pendingUtterance: string | null = null;
+  let sentenceFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ── Helper: send media to Twilio ────────────────────────────────────────
+  // Pre-built JSON envelope — avoids JSON.stringify on every audio chunk
+  // (hundreds per second). The streamSid is set once on "start".
+  let mediaJsonPrefix = "";
+
+  function initMediaPrefix(streamSid: string): void {
+    mediaJsonPrefix = `{"event":"media","streamSid":"${streamSid}","media":{"payload":"`;
+  }
+  const mediaJsonSuffix = '"}}';
+
   function sendToTwilio(base64Audio: string): void {
     if (!session || twilioWs.readyState !== 1) return;
-    twilioWs.send(
-      JSON.stringify({
-        event: "media",
-        streamSid: session.streamSid,
-        media: { payload: base64Audio },
-      }),
-    );
+    twilioWs.send(mediaJsonPrefix + base64Audio + mediaJsonSuffix);
   }
 
   // ── Helper: send mark to Twilio (for tracking playback) ─────────────────
@@ -131,6 +195,27 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
     currentTts.flush();
   }
 
+  // ── Helper: reset the sentence-flush timer ──────────────────────────────
+  // After each text delta, (re)start a timer. If no sentence boundary
+  // arrives within SENTENCE_FLUSH_TIMEOUT_MS, flush the buffer to TTS
+  // so the caller doesn't hear prolonged silence on long clauses.
+  function resetFlushTimer(): void {
+    if (sentenceFlushTimer) clearTimeout(sentenceFlushTimer);
+    sentenceFlushTimer = setTimeout(() => {
+      if (sentenceBuffer.trim() && currentTts) {
+        currentTts.sendText(sentenceBuffer + " ");
+        sentenceBuffer = "";
+      }
+    }, SENTENCE_FLUSH_TIMEOUT_MS);
+  }
+
+  function clearFlushTimer(): void {
+    if (sentenceFlushTimer) {
+      clearTimeout(sentenceFlushTimer);
+      sentenceFlushTimer = null;
+    }
+  }
+
   // ── Helper: mark processing done and drain queued utterance ──────────────
   function finishProcessing(): void {
     if (session) session.isProcessing = false;
@@ -139,6 +224,61 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
       pendingUtterance = null;
       processUserUtterance(queued);
     }
+  }
+
+  // ── Helper: build sentence-piped StreamCallbacks ─────────────────────────
+  // Extracted from processUserUtterance to avoid duplicating the sentence
+  // buffer + flush timer + TTS piping logic between primary and tool paths.
+  function makeSentencePipedCallbacks(
+    ttsReady: Promise<ElevenLabsStream>,
+    callLog: { info: (...args: unknown[]) => void; error: (...args: unknown[]) => void },
+    onDone: (fullText: string) => void,
+    onFail: (err: Error) => void,
+  ): import("../services/anthropic.js").StreamCallbacks {
+    let firstDeltaReceived = false;
+    const startMs = Date.now();
+
+    return {
+      onTextDelta: async (delta) => {
+        // Ensure TTS is connected before sending the first delta
+        if (!currentTts) {
+          currentTts = await ttsReady;
+        }
+        if (!firstDeltaReceived) {
+          firstDeltaReceived = true;
+          callLog.info({ ttftMs: Date.now() - startMs }, "Time to first text delta");
+        }
+
+        sentenceBuffer += delta;
+
+        // Send complete sentences to TTS for more natural pacing
+        const parts = sentenceBuffer.split(SENTENCE_END);
+        if (parts.length > 1) {
+          const toSend = parts.slice(0, -1).join(" ") + " ";
+          currentTts?.sendText(toSend);
+          sentenceBuffer = parts[parts.length - 1]!;
+          clearFlushTimer();
+        }
+        if (sentenceBuffer) resetFlushTimer();
+      },
+
+      onComplete: async (fullText) => {
+        clearFlushTimer();
+        if (!currentTts) {
+          currentTts = await ttsReady;
+        }
+        if (sentenceBuffer.trim()) {
+          currentTts.sendText(sentenceBuffer + " ");
+        }
+        currentTts.flush();
+        sentenceBuffer = "";
+
+        callLog.info({ totalMs: Date.now() - startMs }, "Response complete");
+        onDone(fullText);
+      },
+
+      onError: onFail,
+    };
   }
 
   // ── Helper: process a user utterance through Claude → TTS ───────────────
@@ -157,6 +297,7 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
 
     session.isProcessing = true;
     const callLog = logger.child({ callSid: session.callSid });
+    const utteranceStartMs = Date.now();
 
     // Add user turn to history
     session.conversationHistory.push({
@@ -168,97 +309,89 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
     callLog.info({ utterance: text }, "Processing user utterance");
 
     try {
-      // Create a fresh TTS stream for this response
-      currentTts = await createTtsStream();
+      // Start TTS connection and Anthropic stream in parallel.
+      const ttsReady = createTtsStream();
       sentenceBuffer = "";
 
-      await streamResponse(session, {
-        onTextDelta: (delta) => {
-          sentenceBuffer += delta;
-
-          // Send complete sentences to TTS for more natural pacing
-          const parts = sentenceBuffer.split(SENTENCE_END);
-          if (parts.length > 1) {
-            // Send all complete sentences, preserving original punctuation
-            const toSend = parts.slice(0, -1).join(" ") + " ";
-            currentTts?.sendText(toSend);
-            sentenceBuffer = parts[parts.length - 1]!;
-          }
-        },
-
-        onComplete: (fullText) => {
-          // Flush any remaining text
-          if (sentenceBuffer.trim()) {
-            currentTts?.sendText(sentenceBuffer + " ");
-          }
-          currentTts?.flush();
-          sentenceBuffer = "";
-
-          // Add assistant turn to history
+      const callbacks = makeSentencePipedCallbacks(
+        ttsReady,
+        callLog,
+        (fullText) => {
           session!.conversationHistory.push({
             role: "assistant",
             content: fullText,
             timestamp: Date.now(),
           });
+          callLog.info(
+            { utteranceTotalMs: Date.now() - utteranceStartMs },
+            "Utterance fully processed",
+          );
           finishProcessing();
         },
+        (err) => {
+          callLog.error({ err }, "Claude error");
+          speak(
+            "I'm still here with you. I had a brief technical hiccup on my end, " +
+            "but I'm ready whenever you are. Go ahead.",
+          );
+          finishProcessing();
+        },
+      );
+
+      await streamResponse(session, {
+        ...callbacks,
 
         onToolUse: async (toolName, toolInput, toolUseId) => {
           callLog.info({ toolName }, "Claude requested MCP tool call");
 
           // Tell caller we're working on it
-          currentTts?.sendText("One moment while I look that up. ");
+          currentTts?.sendText("I'm working on that for you right now. I'm still here. ");
           currentTts?.flush();
 
           // Call the CoTrackPro MCP server
+          const mcpStartMs = Date.now();
           const result = await callMCPTool(toolName, toolInput);
+          const mcpDurationMs = Date.now() - mcpStartMs;
+          callLog.info({ toolName, mcpMs: mcpDurationMs }, "MCP tool call complete");
 
-          // Send tool result back to Claude and stream the follow-up.
-          // The assistant message with the tool_use block was already
-          // stored in history by streamResponse.
+          // Persist tool call to DynamoDB
+          appendToolCall(session!.callSid, {
+            toolName,
+            durationMs: mcpDurationMs,
+            timestamp: new Date().toISOString(),
+            success: !result.startsWith("Error:") && !result.startsWith("Tool call failed"),
+          }).catch(() => {});
+
+          // Stream the follow-up through a fresh TTS connection
           currentTts = await createTtsStream();
           sentenceBuffer = "";
 
-          await sendToolResult(session!, toolUseId, result, {
-            onTextDelta: (delta) => {
-              sentenceBuffer += delta;
-              const parts = sentenceBuffer.split(SENTENCE_END);
-              if (parts.length > 1) {
-                const toSend = parts.slice(0, -1).join(" ") + " ";
-                currentTts?.sendText(toSend);
-                sentenceBuffer = parts[parts.length - 1]!;
-              }
-            },
-            onComplete: (fullText) => {
-              if (sentenceBuffer.trim()) {
-                currentTts?.sendText(sentenceBuffer + " ");
-              }
-              currentTts?.flush();
-              sentenceBuffer = "";
-
+          const toolCallbacks = makeSentencePipedCallbacks(
+            Promise.resolve(currentTts),
+            callLog,
+            (fullText) => {
               session!.conversationHistory.push({
                 role: "assistant",
                 content: fullText,
                 timestamp: Date.now(),
               });
-              finishProcessing();
-            },
-            onError: (err) => {
-              callLog.error({ err }, "Claude tool follow-up error");
-              speak(
-                "I'm sorry, I had trouble processing the result. Could you please try again?",
+              callLog.info(
+                { utteranceTotalMs: Date.now() - utteranceStartMs },
+                "Tool follow-up fully processed",
               );
               finishProcessing();
             },
-          });
-        },
-
-        onError: (err) => {
-          callLog.error({ err }, "Claude error");
-          speak(
-            "I'm sorry, I'm having trouble processing that right now. Could you please try again?",
+            (err) => {
+              callLog.error({ err }, "Claude tool follow-up error");
+              speak(
+                "I'm still here. Something went wrong on my end with that last step, " +
+                "but don't worry, nothing was lost. What would you like to do next?",
+              );
+              finishProcessing();
+            },
           );
-          finishProcessing();
+
+          await sendToolResult(session!, toolUseId, result, toolCallbacks);
         },
       });
     } catch (err) {
@@ -286,6 +419,31 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
           const role = (startMsg.start.customParameters?.role as CoTrackProRole) || "parent";
 
           session = createSession(callSid, streamSid, role);
+          initMediaPrefix(streamSid);
+
+          // Persist call record to DynamoDB
+          const callerNumber = startMsg.start.customParameters?.callerNumber ?? "unknown";
+          const direction = (startMsg.start.customParameters?.direction as "inbound" | "outbound") ?? "inbound";
+          createCallRecord({
+            callSid,
+            role,
+            direction,
+            callerNumber: maskPhoneNumber(callerNumber),
+            startedAt: new Date().toISOString(),
+            status: "active",
+            turnCount: 0,
+            transcript: [],
+            safetyEvents: [],
+            toolCalls: [],
+          }).catch((err) => log.error({ err }, "Failed to create DynamoDB call record"));
+
+          // Register for forced cleanup (zombie TTL / max duration reaping)
+          onSessionDestroy(callSid, () => {
+            log.warn({ callSid }, "Session force-reaped — cleaning up");
+            updateCallStatus(callSid, "force-reaped").catch(() => {});
+            cleanup();
+            twilioWs.close();
+          });
 
           // Initialize STT
           sttStream = new STTStream({
@@ -307,12 +465,8 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
             },
           });
 
-          await sttStream.connect();
-
-          // Greet the caller
-          const greeting =
-            "Welcome to CoTrack Pro. I'm here to help with documentation, " +
-            "safety planning, and co-parenting support. How can I help you today?";
+          // Greet the caller with a role-appropriate, trauma-informed greeting
+          const greeting = getRoleGreeting(role);
 
           session.conversationHistory.push({
             role: "assistant",
@@ -320,7 +474,9 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
             timestamp: Date.now(),
           });
 
-          await speak(greeting);
+          // Connect STT and speak greeting in parallel — they're independent
+          // and overlapping saves ~100-200ms of WebSocket handshake time.
+          await Promise.all([sttStream.connect(), speak(greeting)]);
           break;
         }
 
@@ -328,6 +484,7 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
           // Forward caller audio to STT
           if (sttStream && msg.event === "media") {
             sttStream.sendAudio(msg.media.payload);
+            if (session) touchSession(session.callSid);
           }
           break;
         }
@@ -351,9 +508,29 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
 
   // ── Cleanup on disconnect ───────────────────────────────────────────────
   function cleanup(): void {
+    clearFlushTimer();
     sttStream?.close();
     currentTts?.close();
     if (session) {
+      // Persist completed call record to DynamoDB
+      const durationSecs = Math.round((Date.now() - session.createdAt) / 1000);
+      const transcript: TranscriptEntry[] = session.conversationHistory
+        .filter((t) => typeof t.content === "string")
+        .map((t) => ({
+          role: t.role,
+          text: t.content as string,
+          timestamp: new Date(t.timestamp).toISOString(),
+        }));
+      const turnCount = transcript.length;
+
+      completeCallRecord(
+        session.callSid,
+        new Date().toISOString(),
+        durationSecs,
+        transcript,
+        turnCount,
+      ).catch((err) => log.error({ err }, "Failed to complete DynamoDB call record"));
+
       destroySession(session.callSid);
     }
     session = undefined;

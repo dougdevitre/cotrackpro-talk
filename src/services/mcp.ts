@@ -107,10 +107,11 @@ export async function callMCPTool(
   } catch (err) {
     log.error({ err, toolName }, "MCP tool call failed");
 
-    // Graceful fallback — let Claude know the tool failed
+    // Graceful fallback — tell Claude the tool failed so it can
+    // reassure the caller without placing burden on them.
     if (err instanceof Error && err.name === "TimeoutError") {
-      return "The CoTrackPro system is not responding right now. Please try again in a moment.";
+      return "The documentation system is taking longer than expected. The caller's information has not been lost. Reassure the caller and offer to continue without the tool or try the step again shortly.";
     }
-    return `Tool call failed: ${err instanceof Error ? err.message : "unknown error"}`;
+    return `The tool encountered an issue: ${err instanceof Error ? err.message : "unknown error"}. Reassure the caller that nothing was lost and offer to continue.`;
   }
 }

@@ -14,9 +14,10 @@ import fastifyWebSocket from "@fastify/websocket";
 import fastifyFormBody from "@fastify/formbody";
 import { env } from "./config/env.js";
 import { logger } from "./utils/logger.js";
-import { sessionCount } from "./utils/sessions.js";
+import { sessionCount, allSessions } from "./utils/sessions.js";
 import { registerTwimlRoutes } from "./handlers/twiml.js";
 import { registerOutboundRoutes } from "./handlers/outbound.js";
+import { registerRecordRoutes } from "./handlers/records.js";
 import { handleCallStream } from "./handlers/callHandler.js";
 
 async function main() {
@@ -31,6 +32,7 @@ async function main() {
   // ── HTTP Routes ───────────────────────────────────────────────────────
   registerTwimlRoutes(app);
   registerOutboundRoutes(app);
+  registerRecordRoutes(app);
 
   // Health check
   app.get("/health", async (_req, reply) => {
@@ -67,16 +69,43 @@ async function main() {
     logger.info(`  Twilio webhook:  https://${env.serverDomain}/call/incoming`);
     logger.info(`  WebSocket:       wss://${env.serverDomain}/call/stream`);
     logger.info(`  Outbound API:    https://${env.serverDomain}/call/outbound`);
+    logger.info(`  Records API:     https://${env.serverDomain}/records`);
     logger.info(`  Health:          https://${env.serverDomain}/health`);
+    logger.info(`  DynamoDB:        ${env.dynamoEnabled === "true" ? "enabled" : "disabled"}`);
   } catch (err) {
     logger.fatal({ err }, "Failed to start server");
     process.exit(1);
   }
 
-  // ── Graceful shutdown ─────────────────────────────────────────────────
+  // ── Graceful shutdown with call draining ───────────────────────────────
+  const DRAIN_TIMEOUT_MS = 30_000; // Max time to wait for active calls
+
   const shutdown = async (signal: string) => {
-    logger.info({ signal }, "Shutting down");
+    logger.info({ signal, activeCalls: sessionCount() }, "Shutting down — draining active calls");
+
+    // Stop accepting new connections immediately
     await app.close();
+
+    // Wait for active calls to finish (up to DRAIN_TIMEOUT_MS)
+    if (sessionCount() > 0) {
+      const deadline = Date.now() + DRAIN_TIMEOUT_MS;
+      await new Promise<void>((resolve) => {
+        const check = setInterval(() => {
+          if (sessionCount() === 0 || Date.now() > deadline) {
+            clearInterval(check);
+            if (sessionCount() > 0) {
+              logger.warn(
+                { remaining: sessionCount() },
+                "Drain timeout — forcing shutdown with active calls",
+              );
+            }
+            resolve();
+          }
+        }, 500);
+      });
+    }
+
+    logger.info("Shutdown complete");
     process.exit(0);
   };
 
