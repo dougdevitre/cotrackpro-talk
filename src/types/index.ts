@@ -163,9 +163,16 @@ export interface CallSession {
   mcpSessionId?: string;
 }
 
+/**
+ * Content can be a plain string or structured Anthropic content blocks.
+ * Structured blocks are needed for tool_use (assistant) and tool_result (user)
+ * messages so the Anthropic API receives a valid message chain.
+ */
+export type TurnContent = string | Array<Record<string, unknown>>;
+
 export interface ConversationTurn {
   role: "user" | "assistant";
-  content: string;
+  content: TurnContent;
   timestamp: number;
 }
 

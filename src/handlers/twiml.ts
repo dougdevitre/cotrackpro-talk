@@ -9,12 +9,56 @@
  */
 
 import type { FastifyInstance } from "fastify";
+import twilio from "twilio";
 import { env } from "../config/env.js";
 import { logger } from "../utils/logger.js";
 
 const log = logger.child({ handler: "twiml" });
 
+/** Escape a string for safe use in an XML attribute value. */
+function escapeXmlAttr(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 export function registerTwimlRoutes(app: FastifyInstance): void {
+  // ── Twilio signature validation hook ───────────────────────────────────
+  const shouldValidate = env.validateTwilioSignature === "true";
+  if (shouldValidate) {
+    log.info("Twilio webhook signature validation enabled");
+  }
+
+  app.addHook("preHandler", async (request, reply) => {
+    if (!shouldValidate) return;
+    // Only validate Twilio POST webhooks
+    if (request.method !== "POST") return;
+    if (!request.url.startsWith("/call/incoming") && !request.url.startsWith("/call/status")) return;
+
+    const signature = request.headers["x-twilio-signature"] as string | undefined;
+    if (!signature) {
+      log.warn("Missing X-Twilio-Signature header");
+      return reply.status(403).send("Forbidden");
+    }
+
+    const url = `https://${env.serverDomain}${request.url}`;
+    const params = (request.body as Record<string, string>) ?? {};
+    const isValid = twilio.validateRequest(
+      env.twilioAuthToken,
+      signature,
+      url,
+      params,
+    );
+
+    if (!isValid) {
+      log.warn({ url }, "Invalid Twilio signature");
+      return reply.status(403).send("Forbidden");
+    }
+  });
+
   /**
    * Twilio calls this URL when a call arrives on your phone number.
    * We return TwiML that starts a bidirectional media stream.
@@ -37,9 +81,9 @@ export function registerTwimlRoutes(app: FastifyInstance): void {
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="${wsUrl}">
-      <Parameter name="role" value="${role}" />
-      <Parameter name="callerNumber" value="${from}" />
+    <Stream url="${escapeXmlAttr(wsUrl)}">
+      <Parameter name="role" value="${escapeXmlAttr(role)}" />
+      <Parameter name="callerNumber" value="${escapeXmlAttr(from)}" />
     </Stream>
   </Connect>
 </Response>`;

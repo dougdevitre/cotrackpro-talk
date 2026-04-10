@@ -15,7 +15,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { env } from "../config/env.js";
-import type { CallSession, ConversationTurn } from "../types/index.js";
+import type { CallSession } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 
 const client = new Anthropic({ apiKey: env.anthropicApiKey });
@@ -123,12 +123,26 @@ const COTRACKPRO_TOOLS: Anthropic.Tool[] = [
 ];
 
 // ── Build Anthropic messages from conversation history ──────────────────────
+// Keep at most this many turns to stay within context limits on long calls.
+const MAX_HISTORY_TURNS = 40;
+
 function buildMessages(
   session: CallSession,
 ): Anthropic.MessageParam[] {
-  return session.conversationHistory.map((turn) => ({
+  let turns = session.conversationHistory;
+
+  if (turns.length > MAX_HISTORY_TURNS) {
+    // Trim from the front but always start with a user turn so the API
+    // doesn't receive an assistant message first.
+    turns = turns.slice(-MAX_HISTORY_TURNS);
+    while (turns.length > 0 && turns[0].role !== "user") {
+      turns = turns.slice(1);
+    }
+  }
+
+  return turns.map((turn) => ({
     role: turn.role,
-    content: turn.content,
+    content: turn.content as string & Anthropic.MessageParam["content"],
   }));
 }
 
@@ -167,22 +181,30 @@ export async function streamResponse(
       callbacks.onTextDelta(text);
     });
 
-    stream.on("contentBlock", (block) => {
-      if (block.type === "tool_use" && callbacks.onToolUse) {
-        callbacks.onToolUse(
-          block.name,
-          block.input as Record<string, unknown>,
-          block.id,
-        );
-      }
-    });
-
     const finalMessage = await stream.finalMessage();
 
-    // Check for tool_use in stop_reason
+    // If Claude requested a tool call, invoke the callback and do NOT
+    // call onComplete — the tool follow-up path handles completion.
     if (finalMessage.stop_reason === "tool_use") {
-      log.info("Claude requested tool use — MCP call needed");
-      // Tool use is handled via the onToolUse callback above
+      const toolBlock = finalMessage.content.find(
+        (b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
+      );
+      if (toolBlock && callbacks.onToolUse) {
+        log.info({ toolName: toolBlock.name }, "Claude requested tool use — MCP call needed");
+        // Store the full assistant message (text + tool_use blocks) in history
+        // so sendToolResult can build a valid message chain.
+        session.conversationHistory.push({
+          role: "assistant",
+          content: finalMessage.content as unknown as Array<Record<string, unknown>>,
+          timestamp: Date.now(),
+        });
+        callbacks.onToolUse(
+          toolBlock.name,
+          toolBlock.input as Record<string, unknown>,
+          toolBlock.id,
+        );
+        return; // Do NOT call onComplete — tool path handles it
+      }
     }
 
     callbacks.onComplete(fullText);
@@ -193,18 +215,21 @@ export async function streamResponse(
 }
 
 /**
- * Non-streaming single-shot call (used after MCP tool results).
- * Returns the assistant's follow-up text.
+ * Send tool result back to Claude and stream the follow-up response.
+ * The conversation history already contains the assistant message with the
+ * tool_use block (pushed by streamResponse). We append a user message with
+ * the tool_result, then stream Claude's follow-up.
  */
 export async function sendToolResult(
   session: CallSession,
   toolUseId: string,
   toolResult: string,
-): Promise<string> {
-  const messages = buildMessages(session);
+  callbacks: StreamCallbacks,
+): Promise<void> {
+  const log = logger.child({ callSid: session.callSid });
 
-  // Append tool_result
-  messages.push({
+  // Add the tool_result to conversation history
+  session.conversationHistory.push({
     role: "user",
     content: [
       {
@@ -213,18 +238,30 @@ export async function sendToolResult(
         content: toolResult,
       },
     ],
+    timestamp: Date.now(),
   });
 
-  const response = await client.messages.create({
-    model: env.anthropicModel,
-    max_tokens: 512,
-    system: SYSTEM_PROMPT,
-    messages,
-    tools: COTRACKPRO_TOOLS,
-  });
+  try {
+    const stream = client.messages.stream({
+      model: env.anthropicModel,
+      max_tokens: 512,
+      system: SYSTEM_PROMPT,
+      messages: buildMessages(session),
+      tools: COTRACKPRO_TOOLS,
+    });
 
-  const textBlocks = response.content.filter(
-    (b): b is Anthropic.TextBlock => b.type === "text",
-  );
-  return textBlocks.map((b) => b.text).join(" ");
+    let fullText = "";
+
+    stream.on("text", (text) => {
+      fullText += text;
+      callbacks.onTextDelta(text);
+    });
+
+    await stream.finalMessage();
+
+    callbacks.onComplete(fullText);
+  } catch (err) {
+    log.error({ err }, "Anthropic sendToolResult stream error");
+    callbacks.onError(err instanceof Error ? err : new Error(String(err)));
+  }
 }
