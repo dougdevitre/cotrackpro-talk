@@ -48,6 +48,13 @@ export const env = {
   // Twilio webhook signature validation (set to "true" to enable)
   validateTwilioSignature: optional("VALIDATE_TWILIO_SIGNATURE", "false"),
 
+  // DynamoDB
+  dynamoTableName: optional("DYNAMO_TABLE_NAME", "cotrackpro-calls"),
+  dynamoRegion: optional("AWS_REGION", "us-east-1"),
+  // Set to "true" to enable DynamoDB persistence (disabled by default so
+  // the app runs without AWS credentials during local development)
+  dynamoEnabled: optional("DYNAMO_ENABLED", "false"),
+
   // Voice map override (JSON string)
   voiceMapOverride: process.env.VOICE_MAP || "",
 } as const;

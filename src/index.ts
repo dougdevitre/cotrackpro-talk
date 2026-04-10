@@ -17,6 +17,7 @@ import { logger } from "./utils/logger.js";
 import { sessionCount, allSessions } from "./utils/sessions.js";
 import { registerTwimlRoutes } from "./handlers/twiml.js";
 import { registerOutboundRoutes } from "./handlers/outbound.js";
+import { registerRecordRoutes } from "./handlers/records.js";
 import { handleCallStream } from "./handlers/callHandler.js";
 
 async function main() {
@@ -31,6 +32,7 @@ async function main() {
   // ── HTTP Routes ───────────────────────────────────────────────────────
   registerTwimlRoutes(app);
   registerOutboundRoutes(app);
+  registerRecordRoutes(app);
 
   // Health check
   app.get("/health", async (_req, reply) => {
@@ -67,7 +69,9 @@ async function main() {
     logger.info(`  Twilio webhook:  https://${env.serverDomain}/call/incoming`);
     logger.info(`  WebSocket:       wss://${env.serverDomain}/call/stream`);
     logger.info(`  Outbound API:    https://${env.serverDomain}/call/outbound`);
+    logger.info(`  Records API:     https://${env.serverDomain}/records`);
     logger.info(`  Health:          https://${env.serverDomain}/health`);
+    logger.info(`  DynamoDB:        ${env.dynamoEnabled === "true" ? "enabled" : "disabled"}`);
   } catch (err) {
     logger.fatal({ err }, "Failed to start server");
     process.exit(1);

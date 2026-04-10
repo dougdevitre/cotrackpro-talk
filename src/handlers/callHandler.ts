@@ -32,6 +32,7 @@ import type {
   TwilioStartMessage,
   CoTrackProRole,
   CallSession,
+  TranscriptEntry,
 } from "../types/index.js";
 import { createSession, destroySession, touchSession, onSessionDestroy } from "../utils/sessions.js";
 import { logger } from "../utils/logger.js";
@@ -39,6 +40,13 @@ import { ElevenLabsStream } from "../services/elevenlabs.js";
 import { STTStream } from "../services/stt.js";
 import { streamResponse, sendToolResult } from "../services/anthropic.js";
 import { callMCPTool } from "../services/mcp.js";
+import {
+  createCallRecord,
+  completeCallRecord,
+  updateCallStatus,
+  appendToolCall,
+  maskPhoneNumber,
+} from "../services/dynamo.js";
 
 // ── Role-adaptive, trauma-informed greetings ─────────────────────────────────
 function getRoleGreeting(role: CoTrackProRole): string {
@@ -342,10 +350,16 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
           // Call the CoTrackPro MCP server
           const mcpStartMs = Date.now();
           const result = await callMCPTool(toolName, toolInput);
-          callLog.info(
-            { toolName, mcpMs: Date.now() - mcpStartMs },
-            "MCP tool call complete",
-          );
+          const mcpDurationMs = Date.now() - mcpStartMs;
+          callLog.info({ toolName, mcpMs: mcpDurationMs }, "MCP tool call complete");
+
+          // Persist tool call to DynamoDB
+          appendToolCall(session!.callSid, {
+            toolName,
+            durationMs: mcpDurationMs,
+            timestamp: new Date().toISOString(),
+            success: !result.startsWith("Error:") && !result.startsWith("Tool call failed"),
+          }).catch(() => {});
 
           // Stream the follow-up through a fresh TTS connection
           currentTts = await createTtsStream();
@@ -405,9 +419,26 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
           session = createSession(callSid, streamSid, role);
           initMediaPrefix(streamSid);
 
+          // Persist call record to DynamoDB
+          const callerNumber = startMsg.start.customParameters?.callerNumber ?? "unknown";
+          const direction = (startMsg.start.customParameters?.direction as "inbound" | "outbound") ?? "inbound";
+          createCallRecord({
+            callSid,
+            role,
+            direction,
+            callerNumber: maskPhoneNumber(callerNumber),
+            startedAt: new Date().toISOString(),
+            status: "active",
+            turnCount: 0,
+            transcript: [],
+            safetyEvents: [],
+            toolCalls: [],
+          }).catch((err) => log.error({ err }, "Failed to create DynamoDB call record"));
+
           // Register for forced cleanup (zombie TTL / max duration reaping)
           onSessionDestroy(callSid, () => {
             log.warn({ callSid }, "Session force-reaped — cleaning up");
+            updateCallStatus(callSid, "force-reaped").catch(() => {});
             cleanup();
             twilioWs.close();
           });
@@ -479,6 +510,25 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
     sttStream?.close();
     currentTts?.close();
     if (session) {
+      // Persist completed call record to DynamoDB
+      const durationSecs = Math.round((Date.now() - session.createdAt) / 1000);
+      const transcript: TranscriptEntry[] = session.conversationHistory
+        .filter((t) => typeof t.content === "string")
+        .map((t) => ({
+          role: t.role,
+          text: t.content as string,
+          timestamp: new Date(t.timestamp).toISOString(),
+        }));
+      const turnCount = transcript.length;
+
+      completeCallRecord(
+        session.callSid,
+        new Date().toISOString(),
+        durationSecs,
+        transcript,
+        turnCount,
+      ).catch((err) => log.error({ err }, "Failed to complete DynamoDB call record"));
+
       destroySession(session.callSid);
     }
     session = undefined;

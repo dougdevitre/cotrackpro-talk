@@ -196,3 +196,66 @@ export interface MCPToolResult {
   tool_use_id: string;
   content: string;
 }
+
+// ---------------------------------------------------------------------------
+// DynamoDB call records
+// ---------------------------------------------------------------------------
+
+export type CallStatus = "active" | "completed" | "failed" | "force-reaped";
+
+/**
+ * Persisted call record stored in DynamoDB.
+ *
+ * Table design:
+ *   PK: callSid
+ *   GSI "role-date-index": role (PK) + startedAt (SK) — query by role + date range
+ *   GSI "status-date-index": status (PK) + startedAt (SK) — query active/completed
+ */
+export interface CallRecord {
+  /** Twilio call SID — partition key */
+  callSid: string;
+  /** CoTrackPro role */
+  role: CoTrackProRole;
+  /** Call direction */
+  direction: "inbound" | "outbound";
+  /** Caller phone number (masked for PII: "+1***4567") */
+  callerNumber: string;
+  /** ISO 8601 timestamp when the call started */
+  startedAt: string;
+  /** ISO 8601 timestamp when the call ended (set on completion) */
+  endedAt?: string;
+  /** Duration in seconds (set on completion) */
+  durationSecs?: number;
+  /** Call status */
+  status: CallStatus;
+  /** Number of conversation turns */
+  turnCount: number;
+  /** Transcript of the conversation (user + assistant turns only, no tool blocks) */
+  transcript: TranscriptEntry[];
+  /** Safety events triggered during the call */
+  safetyEvents: SafetyEvent[];
+  /** MCP tool calls made during the call */
+  toolCalls: ToolCallRecord[];
+  /** TTL for DynamoDB auto-expiration (epoch seconds, optional) */
+  ttl?: number;
+}
+
+export interface TranscriptEntry {
+  role: "user" | "assistant";
+  text: string;
+  timestamp: string;
+}
+
+export interface SafetyEvent {
+  tier: 1 | 2 | 3;
+  context: string;
+  timestamp: string;
+  toolResult?: string;
+}
+
+export interface ToolCallRecord {
+  toolName: string;
+  durationMs: number;
+  timestamp: string;
+  success: boolean;
+}
