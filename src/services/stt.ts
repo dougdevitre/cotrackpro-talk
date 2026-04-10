@@ -22,6 +22,9 @@ export interface STTStreamOptions {
   onError: (err: Error) => void;
 }
 
+const MAX_RECONNECT_ATTEMPTS = 3;
+const RECONNECT_DELAY_MS = 1000;
+
 export class STTStream {
   private ws: WebSocket | null = null;
   private readonly callSid: string;
@@ -29,6 +32,7 @@ export class STTStream {
   private readonly onFinal: (text: string) => void;
   private readonly onError: (err: Error) => void;
   private isClosed = false;
+  private reconnectAttempts = 0;
   private log;
 
   constructor(opts: STTStreamOptions) {
@@ -50,6 +54,7 @@ export class STTStream {
       });
 
       this.ws.on("open", () => {
+        this.reconnectAttempts = 0;
         this.log.info("STT WS open — configuring session");
         // Configure the STT session for mulaw 8kHz (Twilio format)
         this.ws!.send(
@@ -105,9 +110,19 @@ export class STTStream {
         reject(err);
       });
 
-      this.ws.on("close", () => {
-        this.log.info("STT WS closed");
-        this.isClosed = true;
+      this.ws.on("close", (code) => {
+        this.log.info({ code }, "STT WS closed");
+        // Auto-reconnect on unexpected close (not a deliberate close())
+        if (!this.isClosed && this.reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+          this.reconnectAttempts++;
+          this.log.warn(
+            { attempt: this.reconnectAttempts },
+            "STT WS dropped — reconnecting",
+          );
+          setTimeout(() => {
+            if (!this.isClosed) this.connect().catch(() => {});
+          }, RECONNECT_DELAY_MS * this.reconnectAttempts);
+        }
       });
     });
   }

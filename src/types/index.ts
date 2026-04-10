@@ -159,6 +159,7 @@ export interface CallSession {
   isProcessing: boolean;
   audioBuffer: Buffer[];
   silenceStartMs: number | null;
+  createdAt: number;
   lastActivityMs: number;
   mcpSessionId?: string;
 }
