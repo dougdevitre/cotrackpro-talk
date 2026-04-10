@@ -44,9 +44,20 @@ import {
   createCallRecord,
   completeCallRecord,
   updateCallStatus,
+  updateCallCost,
   appendToolCall,
   maskPhoneNumber,
 } from "../services/dynamo.js";
+import {
+  GREETINGS_ULAW,
+  HOLD_ULAW,
+  ERROR_GENERIC_ULAW,
+  ERROR_TOOL_ULAW,
+  HOLD_TEXT,
+  ERROR_GENERIC_TEXT,
+  ERROR_TOOL_TEXT,
+} from "../audio/prerecorded.js";
+import { estimateCallCost } from "../utils/costEstimator.js";
 
 // ── Role-adaptive, trauma-informed greetings ─────────────────────────────────
 function getRoleGreeting(role: CoTrackProRole): string {
@@ -180,6 +191,10 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
       onError: (err) => {
         log.error({ err }, "TTS error");
       },
+      onChars: (chars) => {
+        // Accumulate billable TTS chars for cost metrics
+        if (session) session.costMetrics.ttsChars += chars;
+      },
     });
 
     await tts.connect();
@@ -193,6 +208,39 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
     currentTts = await createTtsStream();
     currentTts.sendText(text);
     currentTts.flush();
+  }
+
+  // ── Helper: play pre-recorded audio chunks to Twilio ────────────────────
+  // Paces frames at 20ms intervals to match Twilio's 8kHz mulaw playback rate.
+  // This is the zero-cost fast path for fixed phrases (greetings, holds,
+  // error messages). Tracks cached chars for cost metrics.
+  async function playCached(chunks: string[], textForMetrics: string): Promise<void> {
+    if (!chunks || chunks.length === 0) return;
+    if (session) session.costMetrics.ttsCharsCached += textForMetrics.length;
+    isAssistantSpeaking = true;
+    for (const chunk of chunks) {
+      if (twilioWs.readyState !== 1) break;
+      sendToTwilio(chunk);
+      // Pace at 20ms per frame to match Twilio's playback rate
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    sendMark();
+  }
+
+  /**
+   * Try to play a fixed phrase from the audio cache; fall back to live TTS
+   * if the cache entry is missing. Returns true if played from cache.
+   */
+  async function playCachedOrSpeak(
+    cachedChunks: string[] | undefined,
+    text: string,
+  ): Promise<boolean> {
+    if (cachedChunks && cachedChunks.length > 0) {
+      await playCached(cachedChunks, text);
+      return true;
+    }
+    await speak(text);
+    return false;
   }
 
   // ── Helper: reset the sentence-flush timer ──────────────────────────────
@@ -330,9 +378,9 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
         },
         (err) => {
           callLog.error({ err }, "Claude error");
-          speak(
-            "I'm still here with you. I had a brief technical hiccup on my end, " +
-            "but I'm ready whenever you are. Go ahead.",
+          playCachedOrSpeak(
+            ERROR_GENERIC_ULAW[session!.voiceId],
+            ERROR_GENERIC_TEXT,
           );
           finishProcessing();
         },
@@ -344,9 +392,12 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
         onToolUse: async (toolName, toolInput, toolUseId) => {
           callLog.info({ toolName }, "Claude requested MCP tool call");
 
-          // Tell caller we're working on it
-          currentTts?.sendText("I'm working on that for you right now. I'm still here. ");
-          currentTts?.flush();
+          // Tell caller we're working on it. Close the current TTS stream
+          // first so cached audio plays cleanly, then play the hold phrase
+          // from the pre-recorded cache (falls back to live TTS on cache miss).
+          currentTts?.close();
+          currentTts = undefined;
+          await playCachedOrSpeak(HOLD_ULAW[session!.voiceId], HOLD_TEXT);
 
           // Call the CoTrackPro MCP server
           const mcpStartMs = Date.now();
@@ -383,9 +434,9 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
             },
             (err) => {
               callLog.error({ err }, "Claude tool follow-up error");
-              speak(
-                "I'm still here. Something went wrong on my end with that last step, " +
-                "but don't worry, nothing was lost. What would you like to do next?",
+              playCachedOrSpeak(
+                ERROR_TOOL_ULAW[session!.voiceId],
+                ERROR_TOOL_TEXT,
               );
               finishProcessing();
             },
@@ -463,9 +514,14 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
             onError: (err) => {
               log.error({ err }, "STT error");
             },
+            onSeconds: (secs) => {
+              if (session) session.costMetrics.sttSecs += secs;
+            },
           });
 
-          // Greet the caller with a role-appropriate, trauma-informed greeting
+          // Greet the caller with a role-appropriate, trauma-informed greeting.
+          // Prefer the pre-recorded audio cache (zero TTS cost, zero latency);
+          // fall back to live TTS if the cache is empty (generator not run).
           const greeting = getRoleGreeting(role);
 
           session.conversationHistory.push({
@@ -474,9 +530,11 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
             timestamp: Date.now(),
           });
 
-          // Connect STT and speak greeting in parallel — they're independent
-          // and overlapping saves ~100-200ms of WebSocket handshake time.
-          await Promise.all([sttStream.connect(), speak(greeting)]);
+          // Connect STT and play greeting in parallel
+          await Promise.all([
+            sttStream.connect(),
+            playCachedOrSpeak(GREETINGS_ULAW[role], greeting),
+          ]);
           break;
         }
 
@@ -509,6 +567,8 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
   // ── Cleanup on disconnect ───────────────────────────────────────────────
   function cleanup(): void {
     clearFlushTimer();
+    // Close STT/TTS first so their onChars/onSeconds callbacks fire and
+    // populate session.costMetrics BEFORE we finalize the cost summary.
     sttStream?.close();
     currentTts?.close();
     if (session) {
@@ -530,6 +590,21 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
         transcript,
         turnCount,
       ).catch((err) => log.error({ err }, "Failed to complete DynamoDB call record"));
+
+      // Finalize and emit the cost summary for the call
+      const costSummary = estimateCallCost(session.costMetrics);
+      log.info(
+        {
+          callSid: session.callSid,
+          durationSecs,
+          turnCount,
+          ...costSummary,
+        },
+        "cost.call.summary",
+      );
+      updateCallCost(session.callSid, costSummary).catch((err) =>
+        log.error({ err }, "Failed to persist cost summary"),
+      );
 
       destroySession(session.callSid);
     }

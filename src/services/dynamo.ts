@@ -74,19 +74,27 @@ export function maskPhoneNumber(phone: string): string {
 
 /**
  * Create a new call record when a call starts.
+ * Automatically sets TTL from env.recordsTtlDays unless the caller provided one.
  */
 export async function createCallRecord(
   record: CallRecord,
 ): Promise<void> {
   if (!isEnabled) return;
 
+  // Set TTL if not already set — auto-delete after retention window
+  const withTtl: CallRecord = record.ttl !== undefined
+    ? record
+    : {
+        ...record,
+        ttl: Math.floor(Date.now() / 1000) + Math.floor(env.recordsTtlDays * 86400),
+      };
 
-  log.info({ callSid: record.callSid, role: record.role }, "Creating call record");
+  log.info({ callSid: withTtl.callSid, role: withTtl.role, ttl: withTtl.ttl }, "Creating call record");
 
   await db().send(
     new PutCommand({
       TableName: TABLE,
-      Item: record,
+      Item: withTtl,
       ConditionExpression: "attribute_not_exists(callSid)",
     }),
   );
@@ -247,6 +255,30 @@ export async function completeCallRecord(
         ":dur": durationSecs,
         ":transcript": transcript,
         ":turnCount": turnCount,
+      },
+    }),
+  );
+}
+
+// ── UPDATE (cost summary) ────────────────────────────────────────────────────
+
+/**
+ * Attach the finalized per-call cost summary to a call record.
+ * Called from the cleanup path after metrics are aggregated.
+ */
+export async function updateCallCost(
+  callSid: string,
+  costSummary: import("../types/index.js").CallCostSummary,
+): Promise<void> {
+  if (!isEnabled) return;
+
+  await db().send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: { callSid },
+      UpdateExpression: "SET costSummary = :cost",
+      ExpressionAttributeValues: {
+        ":cost": costSummary,
       },
     }),
   );

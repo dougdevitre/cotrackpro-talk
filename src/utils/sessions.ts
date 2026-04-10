@@ -40,6 +40,15 @@ export function createSession(
     silenceStartMs: null,
     createdAt: now,
     lastActivityMs: now,
+    costMetrics: {
+      claudeInputTokens: 0,
+      claudeOutputTokens: 0,
+      claudeCacheCreationTokens: 0,
+      claudeCacheReadTokens: 0,
+      ttsChars: 0,
+      ttsCharsCached: 0,
+      sttSecs: 0,
+    },
   };
   sessions.set(callSid, session);
   streamIndex.set(streamSid, callSid);
