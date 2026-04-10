@@ -20,6 +20,8 @@ export interface STTStreamOptions {
   onFinal: (text: string) => void;
   /** Called on error */
   onError: (err: Error) => void;
+  /** Called with total audio seconds forwarded when the stream closes. Used for cost metrics. */
+  onSeconds?: (secs: number) => void;
 }
 
 const MAX_RECONNECT_ATTEMPTS = 3;
@@ -31,6 +33,9 @@ export class STTStream {
   private readonly onPartial: (text: string) => void;
   private readonly onFinal: (text: string) => void;
   private readonly onError: (err: Error) => void;
+  private readonly onSeconds?: (secs: number) => void;
+  private secondsForwarded = 0;
+  private secondsReported = false;
   private isClosed = false;
   private reconnectAttempts = 0;
   private log;
@@ -40,6 +45,7 @@ export class STTStream {
     this.onPartial = opts.onPartial;
     this.onFinal = opts.onFinal;
     this.onError = opts.onError;
+    this.onSeconds = opts.onSeconds;
     this.log = logger.child({ callSid: opts.callSid, service: "stt" });
   }
 
@@ -130,9 +136,13 @@ export class STTStream {
   /**
    * Feed raw mulaw audio (base64) from Twilio into the STT stream.
    * Twilio sends media.payload as base64 mulaw 8kHz.
+   * Each Twilio frame is 20ms of audio → 0.02 seconds forwarded per call.
    */
   sendAudio(base64Audio: string): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+    // Each Twilio media frame is 20ms at 8kHz mulaw
+    this.secondsForwarded += 0.02;
 
     this.ws.send(
       JSON.stringify({
@@ -149,5 +159,10 @@ export class STTStream {
       this.ws.close();
     }
     this.ws = null;
+    // Report total seconds forwarded exactly once for cost tracking
+    if (!this.secondsReported && this.onSeconds) {
+      this.secondsReported = true;
+      this.onSeconds(this.secondsForwarded);
+    }
   }
 }

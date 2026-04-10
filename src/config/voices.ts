@@ -13,7 +13,7 @@ import type { CoTrackProRole, VoiceMap } from "../types/index.js";
 import { env } from "./env.js";
 
 // ── Default voice IDs (replace with your cloned/library voice IDs) ──────────
-const DEFAULT_VOICE_MAP: VoiceMap = {
+export const DEFAULT_VOICE_MAP: VoiceMap = {
   parent: "EXAVITQu4vr4xnSDxMaL",       // "Sarah" — warm, empathetic
   attorney: "pNInz6obpgDQGcFmaJgB",      // "Adam" — professional, measured
   gal: "ErXwobaYiN019PkySvjV",           // "Antoni" — calm, authoritative

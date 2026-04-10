@@ -54,6 +54,18 @@ export const env = {
   // Set to "true" to enable DynamoDB persistence (disabled by default so
   // the app runs without AWS credentials during local development)
   dynamoEnabled: optional("DYNAMO_ENABLED", "false"),
+  // Retention (days) for call records before DynamoDB TTL auto-deletes them
+  recordsTtlDays: parseFloat(optional("RECORDS_TTL_DAYS", "365")),
+
+  // Pricing (USD per million tokens / per 1K chars / per minute) — used by
+  // the cost estimator. Override via env as prices change.
+  // Defaults reflect Claude Sonnet 4 and ElevenLabs Flash v2.5 at time of writing.
+  claudeInputPricePerMTok: parseFloat(optional("CLAUDE_INPUT_PRICE_PER_MTOK", "3.00")),
+  claudeOutputPricePerMTok: parseFloat(optional("CLAUDE_OUTPUT_PRICE_PER_MTOK", "15.00")),
+  claudeCacheWritePricePerMTok: parseFloat(optional("CLAUDE_CACHE_WRITE_PRICE_PER_MTOK", "3.75")),
+  claudeCacheReadPricePerMTok: parseFloat(optional("CLAUDE_CACHE_READ_PRICE_PER_MTOK", "0.30")),
+  elevenLabsTtsPricePer1KChars: parseFloat(optional("ELEVENLABS_TTS_PRICE_PER_1K_CHARS", "0.10")),
+  elevenLabsSttPricePerMin: parseFloat(optional("ELEVENLABS_STT_PRICE_PER_MIN", "0.008")),
 
   // Voice map override (JSON string)
   voiceMapOverride: process.env.VOICE_MAP || "",

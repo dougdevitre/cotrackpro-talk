@@ -181,6 +181,83 @@ ECS Fargate / EC2
 - Barge-in detection clears Twilio buffer immediately
 - ulaw_8000 output from ElevenLabs = zero transcoding overhead
 
+## Cost Optimization
+
+This service is tuned for cost efficiency. All optimizations are measurable via the per-call cost summary log line `cost.call.summary`.
+
+### Anthropic prompt caching
+
+The system prompt, tools, and conversation history each have a `cache_control: { type: "ephemeral" }` breakpoint. After the first turn of a call, subsequent turns read from the cache at ~10% of normal input token cost. The first-turn creation cost is ~25% above normal but pays back after 2 turns.
+
+Verify cache hits by checking logs for `cacheReadTokens > 0` in the `Claude usage` log line emitted by `streamResponse` and `sendToolResult`.
+
+### Pre-recorded audio cache
+
+Fixed phrases (role greetings, tool hold, error messages) are pre-generated once and stored as ulaw_8000 base64 chunks in `src/audio/prerecorded.ts`. Playback is instant (no TTS handshake + TTFB) and costs zero per call.
+
+**Generate the audio cache** (run once; re-run when voice IDs or phrase text changes):
+
+```bash
+ELEVENLABS_API_KEY=... npm run generate-audio
+```
+
+This calls ElevenLabs REST TTS for every `(phrase, voiceId)` combination and writes the result to `src/audio/prerecorded.ts`. If the file is empty or missing an entry, the call handler falls back to live TTS automatically — so the app always works, but greetings will be slower and paid for until you run the script.
+
+### DynamoDB TTL
+
+Call records auto-delete after `RECORDS_TTL_DAYS` (default `365`) via DynamoDB TTL. Enable it on your table once:
+
+```bash
+aws dynamodb update-time-to-live \
+  --table-name cotrackpro-calls \
+  --time-to-live-specification "Enabled=true, AttributeName=ttl"
+```
+
+The `ttl` field is set automatically by `createCallRecord()` on each new call. Change retention via the `RECORDS_TTL_DAYS` env var (accepts fractional days for testing).
+
+### Cost observability
+
+Each completed call emits a structured log entry with raw metrics and an estimated USD cost:
+
+```json
+{
+  "msg": "cost.call.summary",
+  "callSid": "CAxxx...",
+  "durationSecs": 180,
+  "turnCount": 12,
+  "claudeInputTokens": 1250,
+  "claudeOutputTokens": 850,
+  "claudeCacheCreationTokens": 1875,
+  "claudeCacheReadTokens": 18500,
+  "ttsChars": 2200,
+  "ttsCharsCached": 195,
+  "sttSecs": 142.4,
+  "estimatedCostUsd": 0.0342
+}
+```
+
+Also persisted to the DynamoDB call record as `costSummary`. Create a CloudWatch log metric filter on `cost.call.summary` to plot cost per call over time.
+
+**Pricing is env-overridable** so you can update as provider pricing changes without redeploying:
+
+| Env var | Default (USD) |
+|---|---|
+| `CLAUDE_INPUT_PRICE_PER_MTOK` | `3.00` |
+| `CLAUDE_OUTPUT_PRICE_PER_MTOK` | `15.00` |
+| `CLAUDE_CACHE_WRITE_PRICE_PER_MTOK` | `3.75` |
+| `CLAUDE_CACHE_READ_PRICE_PER_MTOK` | `0.30` |
+| `ELEVENLABS_TTS_PRICE_PER_1K_CHARS` | `0.10` |
+| `ELEVENLABS_STT_PRICE_PER_MIN` | `0.008` |
+
+### Fargate rightsizing
+
+The per-session memory footprint is ~15-20 KB (essentially nothing). The current recommendation of 1 vCPU / 2 GB is conservative. For I/O-bound WebSocket workloads you can usually right-size to:
+
+- **0.5 vCPU / 1 GB** — ~50% cost reduction at moderate concurrency (~25-50 concurrent calls)
+- **0.25 vCPU / 0.5 GB** — ~75% cost reduction at low concurrency (~10-25 concurrent calls)
+
+Load-test before committing: run 50 synthetic concurrent calls and confirm CPU < 60% and memory < 50%. Roll back via task definition revision if CPU saturates.
+
 ## License
 
 Proprietary — CoTrackPro © 2025

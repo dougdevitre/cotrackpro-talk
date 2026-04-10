@@ -26,6 +26,8 @@ export interface ElevenLabsStreamOptions {
   onDone: () => void;
   /** Called on error */
   onError: (err: Error) => void;
+  /** Called with the total characters sent when the stream closes. Used for cost metrics. */
+  onChars?: (chars: number) => void;
 }
 
 export class ElevenLabsStream {
@@ -35,6 +37,9 @@ export class ElevenLabsStream {
   private readonly onAudio: (b64: string) => void;
   private readonly onDone: () => void;
   private readonly onError: (err: Error) => void;
+  private readonly onChars?: (chars: number) => void;
+  private charsSent = 0;
+  private charsReported = false;
   private isClosed = false;
   private log;
 
@@ -44,6 +49,7 @@ export class ElevenLabsStream {
     this.onAudio = opts.onAudio;
     this.onDone = opts.onDone;
     this.onError = opts.onError;
+    this.onChars = opts.onChars;
     this.log = logger.child({ callSid: opts.callSid, service: "elevenlabs" });
   }
 
@@ -116,6 +122,7 @@ export class ElevenLabsStream {
       this.log.warn("Cannot send text — ElevenLabs WS not open");
       return;
     }
+    this.charsSent += text.length;
     this.ws.send(
       JSON.stringify({
         text,
@@ -147,5 +154,10 @@ export class ElevenLabsStream {
       this.ws.close();
     }
     this.ws = null;
+    // Report total chars sent exactly once for cost tracking
+    if (!this.charsReported && this.onChars) {
+      this.charsReported = true;
+      this.onChars(this.charsSent);
+    }
   }
 }

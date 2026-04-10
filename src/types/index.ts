@@ -162,6 +162,30 @@ export interface CallSession {
   createdAt: number;
   lastActivityMs: number;
   mcpSessionId?: string;
+  /** Running cost metrics aggregated across the call lifetime. */
+  costMetrics: CallCostMetrics;
+}
+
+/**
+ * Running cost metrics per call. Populated as the pipeline emits usage events
+ * from Claude, TTS, and STT. Finalized in cleanup() and written to the
+ * DynamoDB call record as a CallCostSummary.
+ */
+export interface CallCostMetrics {
+  /** Claude input tokens billed at full rate (not cached). */
+  claudeInputTokens: number;
+  /** Claude output tokens. */
+  claudeOutputTokens: number;
+  /** Claude input tokens that created a new cache entry (25% premium). */
+  claudeCacheCreationTokens: number;
+  /** Claude input tokens served from cache (10% of base price). */
+  claudeCacheReadTokens: number;
+  /** Characters sent to ElevenLabs TTS. */
+  ttsChars: number;
+  /** Characters played from pre-recorded audio cache (zero TTS cost). */
+  ttsCharsCached: number;
+  /** Seconds of audio forwarded to STT. */
+  sttSecs: number;
 }
 
 /**
@@ -238,6 +262,23 @@ export interface CallRecord {
   toolCalls: ToolCallRecord[];
   /** TTL for DynamoDB auto-expiration (epoch seconds, optional) */
   ttl?: number;
+  /** Cost summary set on call completion. */
+  costSummary?: CallCostSummary;
+}
+
+/**
+ * Finalized cost summary persisted to DynamoDB. Includes raw metrics plus
+ * an estimated USD cost computed from env-configured per-unit prices.
+ */
+export interface CallCostSummary {
+  claudeInputTokens: number;
+  claudeOutputTokens: number;
+  claudeCacheCreationTokens: number;
+  claudeCacheReadTokens: number;
+  ttsChars: number;
+  ttsCharsCached: number;
+  sttSecs: number;
+  estimatedCostUsd: number;
 }
 
 export interface TranscriptEntry {
