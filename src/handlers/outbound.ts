@@ -15,8 +15,29 @@ import { logger } from "../utils/logger.js";
 
 const log = logger.child({ handler: "outbound" });
 
+// Singleton Twilio client — avoids recreating on every outbound call
+const twilioClient = twilio(env.twilioAccountSid, env.twilioAuthToken);
+
+/** Escape a string for safe use in an XML attribute value. */
+function escapeXmlAttr(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 export function registerOutboundRoutes(app: FastifyInstance): void {
   app.post("/call/outbound", async (request, reply) => {
+    // Require Bearer token when OUTBOUND_API_KEY is configured
+    if (env.outboundApiKey) {
+      const auth = request.headers.authorization;
+      if (!auth || auth !== `Bearer ${env.outboundApiKey}`) {
+        return reply.status(401).send({ error: "Unauthorized" });
+      }
+    }
+
     const body = request.body as { to?: string; role?: string } | undefined;
 
     if (!body?.to) {
@@ -30,17 +51,15 @@ export function registerOutboundRoutes(app: FastifyInstance): void {
     const twimlStr = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="${wsUrl}">
-      <Parameter name="role" value="${role}" />
+    <Stream url="${escapeXmlAttr(wsUrl)}">
+      <Parameter name="role" value="${escapeXmlAttr(role)}" />
       <Parameter name="direction" value="outbound" />
     </Stream>
   </Connect>
 </Response>`;
 
     try {
-      const client = twilio(env.twilioAccountSid, env.twilioAuthToken);
-
-      const call = await client.calls.create({
+      const call = await twilioClient.calls.create({
         to,
         from: env.twilioPhoneNumber,
         twiml: twimlStr,

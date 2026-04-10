@@ -42,6 +42,12 @@ export const env = {
   // CoTrackPro MCP
   cotrackproMcpUrl: optional("COTRACKPRO_MCP_URL", "https://mcp.cotrackpro.com/sse"),
 
+  // Outbound API auth (set to require Bearer token on /call/outbound)
+  outboundApiKey: process.env.OUTBOUND_API_KEY || "",
+
+  // Twilio webhook signature validation (set to "true" to enable)
+  validateTwilioSignature: optional("VALIDATE_TWILIO_SIGNATURE", "false"),
+
   // Voice map override (JSON string)
   voiceMapOverride: process.env.VOICE_MAP || "",
 } as const;

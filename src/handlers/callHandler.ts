@@ -41,7 +41,9 @@ import { streamResponse, sendToolResult } from "../services/anthropic.js";
 import { callMCPTool } from "../services/mcp.js";
 
 // ── Sentence boundary detection for natural TTS pacing ──────────────────────
-const SENTENCE_END = /[.!?]\s+/;
+// Matches a sentence-ending punctuation mark followed by whitespace.
+// Uses a lookbehind so the punctuation stays with the preceding sentence.
+const SENTENCE_END = /(?<=[.!?])\s+/;
 
 /**
  * Handle a Twilio bidirectional media stream WebSocket connection.
@@ -54,6 +56,7 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
   let sentenceBuffer = "";
   let isAssistantSpeaking = false;
   let markCounter = 0;
+  let pendingUtterance: string | null = null;
 
   // ── Helper: send media to Twilio ────────────────────────────────────────
   function sendToTwilio(base64Audio: string): void {
@@ -128,10 +131,29 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
     currentTts.flush();
   }
 
+  // ── Helper: mark processing done and drain queued utterance ──────────────
+  function finishProcessing(): void {
+    if (session) session.isProcessing = false;
+    if (pendingUtterance) {
+      const queued = pendingUtterance;
+      pendingUtterance = null;
+      processUserUtterance(queued);
+    }
+  }
+
   // ── Helper: process a user utterance through Claude → TTS ───────────────
   async function processUserUtterance(text: string): Promise<void> {
-    if (!session || session.isProcessing) return;
+    if (!session) return;
     if (!text.trim()) return;
+
+    // If already processing, queue the latest utterance (overwrite any
+    // previously queued one — the caller's most recent speech wins).
+    if (session.isProcessing) {
+      const callLog = logger.child({ callSid: session.callSid });
+      callLog.info({ queued: text }, "Queuing utterance — already processing");
+      pendingUtterance = text;
+      return;
+    }
 
     session.isProcessing = true;
     const callLog = logger.child({ callSid: session.callSid });
@@ -157,8 +179,8 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
           // Send complete sentences to TTS for more natural pacing
           const parts = sentenceBuffer.split(SENTENCE_END);
           if (parts.length > 1) {
-            // Send all complete sentences
-            const toSend = parts.slice(0, -1).join(". ") + ". ";
+            // Send all complete sentences, preserving original punctuation
+            const toSend = parts.slice(0, -1).join(" ") + " ";
             currentTts?.sendText(toSend);
             sentenceBuffer = parts[parts.length - 1]!;
           }
@@ -178,7 +200,7 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
             content: fullText,
             timestamp: Date.now(),
           });
-          session!.isProcessing = false;
+          finishProcessing();
         },
 
         onToolUse: async (toolName, toolInput, toolUseId) => {
@@ -191,30 +213,44 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
           // Call the CoTrackPro MCP server
           const result = await callMCPTool(toolName, toolInput);
 
-          // Store the tool interaction in history
-          session!.conversationHistory.push({
-            role: "assistant",
-            content: `[Tool call: ${toolName}]`,
-            timestamp: Date.now(),
+          // Send tool result back to Claude and stream the follow-up.
+          // The assistant message with the tool_use block was already
+          // stored in history by streamResponse.
+          currentTts = await createTtsStream();
+          sentenceBuffer = "";
+
+          await sendToolResult(session!, toolUseId, result, {
+            onTextDelta: (delta) => {
+              sentenceBuffer += delta;
+              const parts = sentenceBuffer.split(SENTENCE_END);
+              if (parts.length > 1) {
+                const toSend = parts.slice(0, -1).join(" ") + " ";
+                currentTts?.sendText(toSend);
+                sentenceBuffer = parts[parts.length - 1]!;
+              }
+            },
+            onComplete: (fullText) => {
+              if (sentenceBuffer.trim()) {
+                currentTts?.sendText(sentenceBuffer + " ");
+              }
+              currentTts?.flush();
+              sentenceBuffer = "";
+
+              session!.conversationHistory.push({
+                role: "assistant",
+                content: fullText,
+                timestamp: Date.now(),
+              });
+              finishProcessing();
+            },
+            onError: (err) => {
+              callLog.error({ err }, "Claude tool follow-up error");
+              speak(
+                "I'm sorry, I had trouble processing the result. Could you please try again?",
+              );
+              finishProcessing();
+            },
           });
-
-          // Send tool result back to Claude and get follow-up
-          const followUp = await sendToolResult(session!, toolUseId, result);
-
-          if (followUp) {
-            // Speak the follow-up
-            currentTts = await createTtsStream();
-            currentTts.sendText(followUp);
-            currentTts.flush();
-
-            session!.conversationHistory.push({
-              role: "assistant",
-              content: followUp,
-              timestamp: Date.now(),
-            });
-          }
-
-          session!.isProcessing = false;
         },
 
         onError: (err) => {
@@ -222,12 +258,12 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
           speak(
             "I'm sorry, I'm having trouble processing that right now. Could you please try again?",
           );
-          session!.isProcessing = false;
+          finishProcessing();
         },
       });
     } catch (err) {
       callLog.error({ err }, "processUserUtterance failed");
-      session!.isProcessing = false;
+      finishProcessing();
     }
   }
 
