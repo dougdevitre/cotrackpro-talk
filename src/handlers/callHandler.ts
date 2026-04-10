@@ -331,7 +331,8 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
         (err) => {
           callLog.error({ err }, "Claude error");
           speak(
-            "I'm sorry, I'm having trouble processing that right now. Could you please try again?",
+            "I'm still here with you. I had a brief technical hiccup on my end, " +
+            "but I'm ready whenever you are. Go ahead.",
           );
           finishProcessing();
         },
@@ -344,7 +345,7 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
           callLog.info({ toolName }, "Claude requested MCP tool call");
 
           // Tell caller we're working on it
-          currentTts?.sendText("One moment while I look that up. ");
+          currentTts?.sendText("I'm working on that for you right now. I'm still here. ");
           currentTts?.flush();
 
           // Call the CoTrackPro MCP server
@@ -383,7 +384,8 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
             (err) => {
               callLog.error({ err }, "Claude tool follow-up error");
               speak(
-                "I'm sorry, I had trouble processing the result. Could you please try again?",
+                "I'm still here. Something went wrong on my end with that last step, " +
+                "but don't worry, nothing was lost. What would you like to do next?",
               );
               finishProcessing();
             },
