@@ -45,6 +45,10 @@ import { callMCPTool } from "../services/mcp.js";
 // Uses a lookbehind so the punctuation stays with the preceding sentence.
 const SENTENCE_END = /(?<=[.!?])\s+/;
 
+// If no sentence boundary arrives within this window, flush the buffer
+// to TTS anyway so the caller doesn't hear prolonged silence.
+const SENTENCE_FLUSH_TIMEOUT_MS = 500;
+
 /**
  * Handle a Twilio bidirectional media stream WebSocket connection.
  */
@@ -57,17 +61,21 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
   let isAssistantSpeaking = false;
   let markCounter = 0;
   let pendingUtterance: string | null = null;
+  let sentenceFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ── Helper: send media to Twilio ────────────────────────────────────────
+  // Pre-built JSON envelope — avoids JSON.stringify on every audio chunk
+  // (hundreds per second). The streamSid is set once on "start".
+  let mediaJsonPrefix = "";
+
+  function initMediaPrefix(streamSid: string): void {
+    mediaJsonPrefix = `{"event":"media","streamSid":"${streamSid}","media":{"payload":"`;
+  }
+  const mediaJsonSuffix = '"}}';
+
   function sendToTwilio(base64Audio: string): void {
     if (!session || twilioWs.readyState !== 1) return;
-    twilioWs.send(
-      JSON.stringify({
-        event: "media",
-        streamSid: session.streamSid,
-        media: { payload: base64Audio },
-      }),
-    );
+    twilioWs.send(mediaJsonPrefix + base64Audio + mediaJsonSuffix);
   }
 
   // ── Helper: send mark to Twilio (for tracking playback) ─────────────────
@@ -131,6 +139,27 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
     currentTts.flush();
   }
 
+  // ── Helper: reset the sentence-flush timer ──────────────────────────────
+  // After each text delta, (re)start a timer. If no sentence boundary
+  // arrives within SENTENCE_FLUSH_TIMEOUT_MS, flush the buffer to TTS
+  // so the caller doesn't hear prolonged silence on long clauses.
+  function resetFlushTimer(): void {
+    if (sentenceFlushTimer) clearTimeout(sentenceFlushTimer);
+    sentenceFlushTimer = setTimeout(() => {
+      if (sentenceBuffer.trim() && currentTts) {
+        currentTts.sendText(sentenceBuffer + " ");
+        sentenceBuffer = "";
+      }
+    }, SENTENCE_FLUSH_TIMEOUT_MS);
+  }
+
+  function clearFlushTimer(): void {
+    if (sentenceFlushTimer) {
+      clearTimeout(sentenceFlushTimer);
+      sentenceFlushTimer = null;
+    }
+  }
+
   // ── Helper: mark processing done and drain queued utterance ──────────────
   function finishProcessing(): void {
     if (session) session.isProcessing = false;
@@ -168,12 +197,19 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
     callLog.info({ utterance: text }, "Processing user utterance");
 
     try {
-      // Create a fresh TTS stream for this response
-      currentTts = await createTtsStream();
+      // Start TTS connection and Anthropic stream in parallel.
+      // Claude's time-to-first-token (~300ms+) gives the TTS WebSocket
+      // plenty of time to complete its handshake concurrently.
+      const ttsReady = createTtsStream();
       sentenceBuffer = "";
 
       await streamResponse(session, {
-        onTextDelta: (delta) => {
+        onTextDelta: async (delta) => {
+          // Ensure TTS is connected before sending the first delta
+          if (!currentTts) {
+            currentTts = await ttsReady;
+          }
+
           sentenceBuffer += delta;
 
           // Send complete sentences to TTS for more natural pacing
@@ -183,15 +219,24 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
             const toSend = parts.slice(0, -1).join(" ") + " ";
             currentTts?.sendText(toSend);
             sentenceBuffer = parts[parts.length - 1]!;
+            clearFlushTimer();
           }
+          // If text is accumulating without a sentence boundary, start a
+          // timer to flush it so the caller doesn't hear prolonged silence.
+          if (sentenceBuffer) resetFlushTimer();
         },
 
-        onComplete: (fullText) => {
+        onComplete: async (fullText) => {
+          clearFlushTimer();
+          // Ensure TTS is connected
+          if (!currentTts) {
+            currentTts = await ttsReady;
+          }
           // Flush any remaining text
           if (sentenceBuffer.trim()) {
-            currentTts?.sendText(sentenceBuffer + " ");
+            currentTts.sendText(sentenceBuffer + " ");
           }
-          currentTts?.flush();
+          currentTts.flush();
           sentenceBuffer = "";
 
           // Add assistant turn to history
@@ -227,9 +272,12 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
                 const toSend = parts.slice(0, -1).join(" ") + " ";
                 currentTts?.sendText(toSend);
                 sentenceBuffer = parts[parts.length - 1]!;
+                clearFlushTimer();
               }
+              if (sentenceBuffer) resetFlushTimer();
             },
             onComplete: (fullText) => {
+              clearFlushTimer();
               if (sentenceBuffer.trim()) {
                 currentTts?.sendText(sentenceBuffer + " ");
               }
@@ -286,6 +334,7 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
           const role = (startMsg.start.customParameters?.role as CoTrackProRole) || "parent";
 
           session = createSession(callSid, streamSid, role);
+          initMediaPrefix(streamSid);
 
           // Initialize STT
           sttStream = new STTStream({
@@ -307,8 +356,6 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
             },
           });
 
-          await sttStream.connect();
-
           // Greet the caller
           const greeting =
             "Welcome to CoTrack Pro. I'm here to help with documentation, " +
@@ -320,7 +367,9 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
             timestamp: Date.now(),
           });
 
-          await speak(greeting);
+          // Connect STT and speak greeting in parallel — they're independent
+          // and overlapping saves ~100-200ms of WebSocket handshake time.
+          await Promise.all([sttStream.connect(), speak(greeting)]);
           break;
         }
 
@@ -351,6 +400,7 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
 
   // ── Cleanup on disconnect ───────────────────────────────────────────────
   function cleanup(): void {
+    clearFlushTimer();
     sttStream?.close();
     currentTts?.close();
     if (session) {

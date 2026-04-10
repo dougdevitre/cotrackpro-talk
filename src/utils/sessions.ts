@@ -11,6 +11,8 @@ import { getVoiceId } from "../config/voices.js";
 import { logger } from "./logger.js";
 
 const sessions = new Map<string, CallSession>();
+// Reverse index: streamSid → callSid for O(1) lookup
+const streamIndex = new Map<string, string>();
 
 export function createSession(
   callSid: string,
@@ -29,6 +31,7 @@ export function createSession(
     lastActivityMs: Date.now(),
   };
   sessions.set(callSid, session);
+  streamIndex.set(streamSid, callSid);
   logger.info({ callSid, role, streamSid }, "Session created");
   return session;
 }
@@ -38,13 +41,15 @@ export function getSession(callSid: string): CallSession | undefined {
 }
 
 export function getSessionByStream(streamSid: string): CallSession | undefined {
-  for (const s of sessions.values()) {
-    if (s.streamSid === streamSid) return s;
-  }
-  return undefined;
+  const callSid = streamIndex.get(streamSid);
+  return callSid ? sessions.get(callSid) : undefined;
 }
 
 export function destroySession(callSid: string): void {
+  const session = sessions.get(callSid);
+  if (session) {
+    streamIndex.delete(session.streamSid);
+  }
   sessions.delete(callSid);
   logger.info({ callSid }, "Session destroyed");
 }
