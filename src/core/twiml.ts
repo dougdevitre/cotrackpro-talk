@@ -61,6 +61,48 @@ export function validateTwilioSignature(
 }
 
 /**
+ * Reconstruct the EXACT public URL Twilio signed, ignoring whatever
+ * the framework has rewritten `req.url` into.
+ *
+ * Why this helper exists: on Vercel, a rewrite in `vercel.json` maps
+ * the public path `/call/incoming` to the internal file-based route
+ * `/api/call/incoming`. By the time our handler sees the request,
+ * `req.url` has already been rewritten to the internal path. But
+ * Twilio signed the ORIGINAL public path, so reconstructing the URL
+ * from `req.url` would produce a different string and the signature
+ * check would fail.
+ *
+ * We fix this by taking the public path as a parameter — hardcoded
+ * in each Vercel handler — and splicing on only the query string
+ * from `req.url`. The path portion of `req.url` is deliberately
+ * ignored.
+ *
+ * Flagged as M-2 in docs/CODE_REVIEW-vercel-hosting-optimization.md.
+ * This helper is the single place to regression-test the behavior
+ * so a future refactor that tries to be "cleaner" by reading
+ * `req.url` directly gets caught by unit tests.
+ *
+ * @param reqUrl       The raw `req.url` from the Node HTTP request.
+ *                     May be rewritten (e.g. "/api/call/incoming?role=x")
+ *                     or the public path ("/call/incoming?role=x") in
+ *                     single-host mode. The path portion is DISCARDED.
+ * @param publicPath   The public path Twilio signed (must begin with
+ *                     "/"), e.g. "/call/incoming".
+ * @param apiDomain    The public domain Twilio was pointed at, e.g.
+ *                     env.apiDomain. No scheme prefix — we always use
+ *                     https since Twilio requires it.
+ */
+export function buildSignedWebhookUrl(
+  reqUrl: string | undefined,
+  publicPath: string,
+  apiDomain: string,
+): string {
+  const queryIdx = (reqUrl ?? "").indexOf("?");
+  const query = queryIdx >= 0 ? (reqUrl as string).slice(queryIdx + 1) : "";
+  return `https://${apiDomain}${publicPath}${query ? `?${query}` : ""}`;
+}
+
+/**
  * Build the TwiML response that Twilio receives when a call comes in.
  * Opens a bidirectional Media Stream to the WebSocket host.
  *

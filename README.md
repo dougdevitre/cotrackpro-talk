@@ -180,7 +180,7 @@ Call your Twilio number. You should hear the CoTrackPro greeting in the assigned
 |--------|------|-------------|
 | POST | `/call/incoming` | Twilio webhook — returns TwiML to start media stream |
 | WS | `/call/stream` | Bidirectional media stream (Twilio ↔ server) |
-| POST | `/call/outbound` | Initiate outbound call: `{ "to": "+15551234567", "role": "attorney" }`. E.164 format + country allow-list enforced. |
+| POST | `/call/outbound` | Initiate outbound call: `{ "to": "+15551234567", "role": "attorney" }`. E.164 format + country allow-list enforced. Send `Idempotency-Key: <uuid>` to make retries safe — the same key replays the cached response for 24 hours. |
 | POST | `/call/status` | Call status callbacks from Twilio |
 | GET | `/records` | List recent call records (paginated, Bearer-auth) |
 | GET | `/records/:callSid` | Get a single call record |
@@ -397,6 +397,22 @@ The counter lives in the KV store abstraction (`src/services/kv.ts`). In single-
 Rate-limited requests return **429 Too Many Requests** with a `Retry-After` header and a JSON body including `retryAfterSeconds`.
 
 Along with rate limiting, `/call/outbound` now **validates the `to` number** against a strict E.164 regex and a country allow-list (`OUTBOUND_ALLOWED_COUNTRY_CODES`, default `"US,CA"`). This closes the premium-rate international dial fraud surface — even if an attacker drains the full per-hour budget, they can only dial numbers in your allow-list.
+
+### Idempotent `/call/outbound` retries
+
+Clients that retry a POST `/call/outbound` after a network blip would previously dial the call twice. To make retries safe, send an **`Idempotency-Key`** header with a stable unique ID (UUID recommended). The first request runs the work and caches the response under that key for 24 hours; every subsequent request with the same key replays the cached response with `X-Idempotent-Replay: true` and never touches Twilio.
+
+```bash
+curl -X POST https://api.example.com/call/outbound \
+  -H "Authorization: Bearer $OUTBOUND_API_KEY" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -H "Content-Type: application/json" \
+  -d '{"to":"+15551234567","role":"attorney"}'
+```
+
+Keys must be 1-256 printable ASCII characters. Malformed keys return 400. Deterministic 400 responses (e.g. bad phone number) are cached too, so retries of a broken request don't burn rate-limit budget. Transient 500s are **not** cached — retries need to be able to get past a transient Twilio failure.
+
+The cache uses the same KV abstraction as rate limiting, so Upstash Redis / Vercel KV gives you shared replay across the Vercel and WS tiers.
 
 ### Admin dashboard
 

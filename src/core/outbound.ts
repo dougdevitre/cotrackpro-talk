@@ -14,6 +14,11 @@ import { checkRateLimit, hashClientKey } from "./rateLimit.js";
 import { bearerMatches } from "./auth.js";
 import { validateDialable } from "./phoneValidation.js";
 import { normalizeRole } from "./enumValidation.js";
+import {
+  lookupIdempotent,
+  parseIdempotencyKey,
+  storeIdempotent,
+} from "./idempotency.js";
 
 const log = logger.child({ core: "outbound" });
 
@@ -37,6 +42,8 @@ export type OutboundResult =
         to: string;
         role: string;
       };
+      /** Optional headers the adapter should set. */
+      headers?: Record<string, string>;
     }
   | {
       ok: false;
@@ -122,10 +129,51 @@ export async function checkOutboundRateLimit(
  * Initiate an outbound call. Validates input, authorizes, then calls
  * the Twilio REST API. Returns a structured result the caller
  * (Fastify or Vercel) maps to its HTTP response.
+ *
+ * When `idempotencyKeyHeader` is provided, the result of the first
+ * successful-or-deterministically-failed call with that key is cached
+ * for 24 hours. Subsequent calls with the same key return the cached
+ * response with `X-Idempotent-Replay: true` and never touch Twilio.
+ * This closes the double-dial window on network-retry. See M-3 in
+ * docs/CODE_REVIEW-vercel-hosting-optimization.md.
+ *
+ * Transient server errors (500 from our side, including Twilio REST
+ * failures) are NOT cached — the whole point of retries is to get
+ * past a transient failure, and cached-500 would defeat that.
  */
 export async function initiateOutboundCall(
   body: OutboundRequest | undefined,
+  idempotencyKeyHeader?: string | string[],
 ): Promise<OutboundResult> {
+  // Parse + validate the Idempotency-Key header first. A malformed
+  // header short-circuits to 400 — we don't silently drop it, because
+  // a client that asked for idempotency and got it ignored would be
+  // a bug waiting to happen.
+  const keyParse = parseIdempotencyKey(idempotencyKeyHeader);
+  if (!keyParse.ok) return keyParse;
+  const idempotencyHash = keyParse.key;
+
+  // Cache lookup. Hit → return cached result with X-Idempotent-Replay.
+  // Miss → proceed with the real work.
+  const lookup = await lookupIdempotent<OutboundResult>(
+    "outbound",
+    idempotencyHash,
+  );
+  if (lookup.hit) {
+    log.info({ idempotencyHash }, "Outbound call idempotent replay");
+    // Defensive clone + add replay header. We don't mutate the cached
+    // value because the KV MemoryKv backend shares the object
+    // reference across reads.
+    const cached = lookup.cachedValue;
+    return {
+      ...cached,
+      headers: {
+        ...(cached.headers ?? {}),
+        "X-Idempotent-Replay": "true",
+      },
+    } as OutboundResult;
+  }
+
   if (!body?.to) {
     return {
       ok: false,
@@ -144,7 +192,7 @@ export async function initiateOutboundCall(
       { to: body.to, reason: phoneCheck.reason },
       "Outbound call rejected — phone number failed validation",
     );
-    return {
+    const result: OutboundResult = {
       ok: false,
       status: 400,
       body: {
@@ -152,6 +200,11 @@ export async function initiateOutboundCall(
         details: phoneCheck.detail,
       },
     };
+    // Cache the deterministic 400 — same bad input will always fail
+    // the same way, and we don't want retries to burn rate-limit
+    // budget re-validating.
+    await storeIdempotent("outbound", idempotencyHash, result);
+    return result;
   }
 
   // Validate role is a known CoTrackPro persona (H-2/H-3 in the code
@@ -172,7 +225,7 @@ export async function initiateOutboundCall(
 
     log.info({ callSid: call.sid, to, role }, "Outbound call initiated");
 
-    return {
+    const result: OutboundResult = {
       ok: true,
       status: 200,
       body: {
@@ -181,9 +234,18 @@ export async function initiateOutboundCall(
         to,
         role,
       },
+      headers: idempotencyHash
+        ? { "X-Idempotent-Replay": "false" }
+        : undefined,
     };
+    // Cache the success so a retry of the same idempotency key
+    // returns the same callSid instead of dialing again.
+    await storeIdempotent("outbound", idempotencyHash, result);
+    return result;
   } catch (err) {
     log.error({ err, to }, "Failed to initiate outbound call");
+    // Deliberately NOT cached — transient Twilio errors should be
+    // retryable. Caching the 500 would break the retry story.
     return {
       ok: false,
       status: 500,

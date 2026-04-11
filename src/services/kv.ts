@@ -30,6 +30,19 @@ import { logger } from "../utils/logger.js";
 
 const log = logger.child({ service: "kv" });
 
+/**
+ * One step in a pipelined write. Only `incrBy` is supported today
+ * because that's all the rate limiter needs; extend as new callers
+ * require it. Kept narrow so both backends can implement the
+ * semantics precisely rather than fighting a generic command ABI.
+ */
+export type PipelineOp = {
+  op: "incrBy";
+  key: string;
+  by: number;
+  ttlSeconds?: number;
+};
+
 export interface KvStore {
   /** Get a string value, or null if missing/expired. */
   get(key: string): Promise<string | null>;
@@ -47,21 +60,80 @@ export interface KvStore {
   incrBy(key: string, by?: number, ttlSeconds?: number): Promise<number>;
   /** Delete a key. No-op if missing. */
   delete(key: string): Promise<void>;
+  /**
+   * Run a batch of operations as a single unit. Returns the result of
+   * each op in the same order — for `incrBy` ops that's the new
+   * integer value. Failure modes:
+   *
+   *   - MemoryKv: atomic by construction (single-threaded JS).
+   *   - UpstashKv: ships as one HTTP request to the REST /pipeline
+   *     endpoint; Upstash runs the commands sequentially on one
+   *     connection. A network-level failure aborts the whole batch,
+   *     so callers never see a half-applied state — which is the
+   *     point (M-1 in the code review: the old split-call path
+   *     could leave the minute counter bumped while the hour
+   *     counter remained untouched).
+   *
+   * Callers should treat a thrown error as a transient failure and
+   * fail open if they care about availability.
+   */
+  pipeline(ops: PipelineOp[]): Promise<number[]>;
 }
 
 // ── In-memory backend ───────────────────────────────────────────────────────
 //
-// Per-process Map with explicit expiry. A lazy sweep (on read) removes
-// expired entries; there's no background timer so the store has zero
-// overhead when unused.
+// Per-process Map with explicit expiry. Expired entries are dropped on
+// read (lazy cleanup) AND via an amortized sweep every SWEEP_EVERY_N
+// writes. Previously this only cleaned up on read, which meant a caller
+// that wrote keys-with-TTL and never read them could grow the Map
+// unboundedly. In practice this hasn't bitten because the rate limiter
+// is a heavy reader, but the idempotency cache (which reads only on
+// retries) could have tripped it. M-5 in
+// docs/CODE_REVIEW-vercel-hosting-optimization.md.
 
 type Entry = { value: string; expiresAt: number | null };
 
+/**
+ * How often to run the amortized sweep of expired entries. Every Nth
+ * write (across set + incrBy) triggers a scan-and-delete pass over
+ * the whole Map. 128 is a rough sweet spot: large enough that the
+ * per-write cost is negligible, small enough that an unbounded Map
+ * can't get very large before being trimmed. Exported for tests.
+ */
+export const MEMORY_KV_SWEEP_EVERY_N_WRITES = 128;
+
 class MemoryKv implements KvStore {
   private store = new Map<string, Entry>();
+  private writeCount = 0;
 
   private isExpired(entry: Entry): boolean {
     return entry.expiresAt !== null && Date.now() >= entry.expiresAt;
+  }
+
+  /**
+   * Lazy sweep of expired entries. Called from the write path every
+   * SWEEP_EVERY_N writes. O(n) in the size of the Map but amortized
+   * to O(1) per write. Safe to call concurrently — we're
+   * single-threaded JS, Map iteration during delete is defined
+   * behavior.
+   */
+  private maybeSweep(): void {
+    this.writeCount += 1;
+    if (this.writeCount % MEMORY_KV_SWEEP_EVERY_N_WRITES !== 0) return;
+    this.sweep();
+  }
+
+  /**
+   * Unconditional sweep of expired entries. Exposed for tests via
+   * `_sweepNow` — production code relies on `maybeSweep`.
+   */
+  private sweep(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.store) {
+      if (entry.expiresAt !== null && now >= entry.expiresAt) {
+        this.store.delete(key);
+      }
+    }
   }
 
   async get(key: string): Promise<string | null> {
@@ -79,6 +151,7 @@ class MemoryKv implements KvStore {
       value,
       expiresAt: ttlSeconds ? Date.now() + ttlSeconds * 1000 : null,
     });
+    this.maybeSweep();
   }
 
   async incrBy(
@@ -98,11 +171,47 @@ class MemoryKv implements KvStore {
         ? Date.now() + ttlSeconds * 1000
         : existing?.expiresAt ?? null,
     });
+    this.maybeSweep();
     return next;
   }
 
   async delete(key: string): Promise<void> {
     this.store.delete(key);
+  }
+
+  async pipeline(ops: PipelineOp[]): Promise<number[]> {
+    // In a single-threaded JS process there's no observable
+    // concurrency between these calls, so "run each op in turn" is
+    // already atomic. No need for fancier machinery.
+    const results: number[] = [];
+    for (const op of ops) {
+      if (op.op === "incrBy") {
+        results.push(await this.incrBy(op.key, op.by, op.ttlSeconds));
+      }
+    }
+    return results;
+  }
+
+  // ── Test-only helpers ──────────────────────────────────────────
+  //
+  // Exposed for unit tests so we can force-sweep without having to
+  // write 128 entries first, and inspect the internal size without
+  // coupling the test to Map implementation details. DO NOT call
+  // from production code.
+
+  /** Current entry count (including not-yet-swept expired entries). */
+  _sizeForTests(): number {
+    return this.store.size;
+  }
+
+  /** Force an immediate sweep. */
+  _sweepNowForTests(): void {
+    this.sweep();
+  }
+
+  /** Number of writes observed by this instance. */
+  _writeCountForTests(): number {
+    return this.writeCount;
   }
 }
 
@@ -119,6 +228,10 @@ class UpstashKv implements KvStore {
     private readonly token: string,
   ) {}
 
+  /**
+   * Send a single Redis command. Throws on network failure, HTTP
+   * non-2xx, or an Upstash `error` field in the JSON body.
+   */
   private async call(command: string[]): Promise<unknown> {
     const res = await fetch(this.url, {
       method: "POST",
@@ -137,6 +250,56 @@ class UpstashKv implements KvStore {
       throw new Error(`Upstash ${command[0]} error: ${json.error}`);
     }
     return json.result;
+  }
+
+  /**
+   * Send multiple Redis commands in one HTTP round-trip via the
+   * Upstash `/pipeline` endpoint. Upstash runs the commands
+   * sequentially on one connection so partial state is impossible —
+   * either every command lands or the whole batch throws.
+   *
+   * Reference: https://upstash.com/docs/redis/features/restapi#pipeline
+   *
+   * The pipeline URL is derived from the base URL by appending
+   * `/pipeline`. Vercel KV uses the same endpoint layout because
+   * it's a drop-in Upstash clone.
+   */
+  private async callBatch(commands: string[][]): Promise<unknown[]> {
+    // `new URL("pipeline", this.url)` would replace the last path
+    // segment in some cases; manual concatenation with a trailing
+    // slash guarantees we append.
+    const base = this.url.endsWith("/") ? this.url : this.url + "/";
+    const pipelineUrl = base + "pipeline";
+
+    const res = await fetch(pipelineUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(commands),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Upstash pipeline failed: ${res.status} ${text}`);
+    }
+    const body = (await res.json()) as Array<{
+      result?: unknown;
+      error?: string;
+    }>;
+    if (!Array.isArray(body)) {
+      throw new Error("Upstash pipeline: expected array response");
+    }
+    // Upstash returns per-command errors inline. Surface the first
+    // one so the caller knows something went wrong.
+    for (let i = 0; i < body.length; i++) {
+      if (body[i].error) {
+        throw new Error(
+          `Upstash pipeline[${i}] ${commands[i]?.[0]} error: ${body[i].error}`,
+        );
+      }
+    }
+    return body.map((entry) => entry.result);
   }
 
   async get(key: string): Promise<string | null> {
@@ -179,6 +342,46 @@ class UpstashKv implements KvStore {
 
   async delete(key: string): Promise<void> {
     await this.call(["DEL", key]);
+  }
+
+  async pipeline(ops: PipelineOp[]): Promise<number[]> {
+    if (ops.length === 0) return [];
+
+    // Build a flat command list + remember which entries are
+    // INCRBY results (we only return those) vs. EXPIRE bookkeeping.
+    // Example for 2 incrBy-with-ttl ops:
+    //   [INCRBY k1, EXPIRE k1, INCRBY k2, EXPIRE k2]
+    //              ^drop         ^keep     ^drop
+    const commands: string[][] = [];
+    const resultIndices: number[] = []; // positions in `commands` that
+                                        // produce the caller-visible number
+    for (const op of ops) {
+      if (op.op !== "incrBy") continue;
+      resultIndices.push(commands.length);
+      commands.push(["INCRBY", op.key, String(op.by)]);
+      if (op.ttlSeconds) {
+        // Unconditional EXPIRE inside the pipeline: cheaper than
+        // EXPIRE NX, and for the rate-limit use case (fixed-window
+        // keys that roll over at window boundaries) the overrun is
+        // harmless — next window uses a new key, so re-setting the
+        // TTL on every write doesn't extend any logical window.
+        commands.push(["EXPIRE", op.key, String(op.ttlSeconds)]);
+      }
+    }
+
+    const raw = await this.callBatch(commands);
+
+    // Extract only the INCRBY positions as numbers.
+    return resultIndices.map((i) => {
+      const v = raw[i];
+      const n = typeof v === "number" ? v : Number(v);
+      if (!Number.isFinite(n)) {
+        throw new Error(
+          `Upstash pipeline: unexpected INCRBY result at position ${i}: ${String(v)}`,
+        );
+      }
+      return n;
+    });
   }
 }
 

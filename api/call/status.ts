@@ -9,6 +9,7 @@
 import type { IncomingMessage, ServerResponse } from "http";
 import { env } from "../../src/config/env.js";
 import {
+  buildSignedWebhookUrl,
   logStatusCallback,
   validateTwilioSignature,
 } from "../../src/core/twiml.js";
@@ -27,13 +28,14 @@ export default async function handler(
   const body = await parseBody(req);
 
   // Twilio signed the public path ("/call/status"); Vercel's rewrite
-  // changes req.url to "/api/call/status", so we must rebuild from the
-  // known public path + original query string.
+  // changes req.url to "/api/call/status", so we reconstruct the
+  // public URL via buildSignedWebhookUrl (see M-2 in the code review).
   const signature = req.headers["x-twilio-signature"] as string | undefined;
-  const originalQuery = (req.url || "").split("?")[1];
-  const fullUrl =
-    `https://${env.apiDomain}/call/status` +
-    (originalQuery ? `?${originalQuery}` : "");
+  const fullUrl = buildSignedWebhookUrl(
+    req.url,
+    "/call/status",
+    env.apiDomain,
+  );
   if (!validateTwilioSignature(signature, fullUrl, body)) {
     sendStatus(res, 403, "Forbidden");
     return;

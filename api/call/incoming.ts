@@ -16,6 +16,7 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { env } from "../../src/config/env.js";
 import {
   buildIncomingTwiml,
+  buildSignedWebhookUrl,
   logIncomingCall,
   validateTwilioSignature,
 } from "../../src/core/twiml.js";
@@ -38,13 +39,16 @@ export default async function handler(
 
   // Twilio signed the EXACT public URL it hit. Vercel's rewrite turns
   // the public "/call/incoming" into the internal "/api/call/incoming"
-  // in req.url, so we must NOT read the path from req.url here —
-  // hardcode the public path + preserve the original query string.
+  // in req.url, so we MUST NOT read the path from req.url — we hardcode
+  // the public path and splice on the original query string via
+  // buildSignedWebhookUrl. See src/core/twiml.ts for the rationale
+  // and docs/CODE_REVIEW-vercel-hosting-optimization.md M-2.
   const signature = req.headers["x-twilio-signature"] as string | undefined;
-  const originalQuery = (req.url || "").split("?")[1];
-  const fullUrl =
-    `https://${env.apiDomain}/call/incoming` +
-    (originalQuery ? `?${originalQuery}` : "");
+  const fullUrl = buildSignedWebhookUrl(
+    req.url,
+    "/call/incoming",
+    env.apiDomain,
+  );
   if (!validateTwilioSignature(signature, fullUrl, body)) {
     sendStatus(res, 403, "Forbidden");
     return;

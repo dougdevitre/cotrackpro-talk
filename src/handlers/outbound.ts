@@ -37,8 +37,16 @@ export function registerOutboundRoutes(app: FastifyInstance): void {
     );
     if (rateLimitError) return sendResult(reply, rateLimitError);
 
+    // Idempotency-Key is forwarded to initiateOutboundCall which
+    // handles lookup + cache on its own. Fastify lowercases header
+    // names by default so this is the canonical form.
+    const idempotencyKey = request.headers["idempotency-key"] as
+      | string
+      | string[]
+      | undefined;
     const result = await initiateOutboundCall(
       request.body as OutboundRequest | undefined,
+      idempotencyKey,
     );
     return sendResult(reply, result);
   });

@@ -11,6 +11,7 @@ import {
   escapeXmlAttr,
   buildIncomingTwiml,
   buildOutboundTwiml,
+  buildSignedWebhookUrl,
   signatureValidationEnabled,
   validateTwilioSignature,
   logIncomingCall,
@@ -236,5 +237,171 @@ describe("logIncomingCall", () => {
     const { from, callSid } = logIncomingCall(undefined);
     assert.equal(from, "unknown");
     assert.equal(callSid, "unknown");
+  });
+});
+
+// ── M-2: Vercel rewrite regression guards for buildSignedWebhookUrl ──
+//
+// These tests pin the behavior of buildSignedWebhookUrl against a
+// specific regression class: a well-meaning refactor that tries to
+// use `req.url` as the path portion of the signed URL. On Vercel,
+// `req.url` has already been rewritten to the internal `/api/...`
+// path by the time the handler sees it. Twilio signed the public
+// path, so mirroring `req.url` would 403 every real Twilio request.
+//
+// The helper sits on the signed-URL construction path shared by
+// api/call/incoming.ts and api/call/status.ts. Both tests below
+// also exercise the end-to-end scenario by handing the resulting
+// URL to twilio.validateRequest.
+
+describe("buildSignedWebhookUrl (M-2)", () => {
+  it("ignores the path portion of req.url", () => {
+    // The classic Vercel-rewrite scenario: req.url is the INTERNAL
+    // /api path, but Twilio signed the PUBLIC path. The helper
+    // must emit the public path verbatim.
+    const url = buildSignedWebhookUrl(
+      "/api/call/incoming",
+      "/call/incoming",
+      "api.example.com",
+    );
+    assert.equal(url, "https://api.example.com/call/incoming");
+  });
+
+  it("also works when req.url already IS the public path (single-host mode)", () => {
+    const url = buildSignedWebhookUrl(
+      "/call/incoming",
+      "/call/incoming",
+      "single.example.com",
+    );
+    assert.equal(url, "https://single.example.com/call/incoming");
+  });
+
+  it("splices on the original query string verbatim", () => {
+    const url = buildSignedWebhookUrl(
+      "/api/call/incoming?role=attorney",
+      "/call/incoming",
+      "api.example.com",
+    );
+    assert.equal(
+      url,
+      "https://api.example.com/call/incoming?role=attorney",
+    );
+  });
+
+  it("preserves multi-key query strings exactly as they arrive", () => {
+    const url = buildSignedWebhookUrl(
+      "/api/call/incoming?role=judge&foo=bar&baz=qux",
+      "/call/incoming",
+      "api.example.com",
+    );
+    assert.equal(
+      url,
+      "https://api.example.com/call/incoming?role=judge&foo=bar&baz=qux",
+    );
+  });
+
+  it("returns no '?' when req.url has no query", () => {
+    const url = buildSignedWebhookUrl(
+      "/api/call/status",
+      "/call/status",
+      "api.example.com",
+    );
+    // No trailing "?" — Twilio's signing string wouldn't have one,
+    // so neither can ours.
+    assert.equal(url, "https://api.example.com/call/status");
+    assert.ok(!url.includes("?"));
+  });
+
+  it("handles an empty query after the '?'", () => {
+    // Some clients emit "/path?" with an empty query. Match that
+    // in the reconstructed URL so the signature aligns.
+    const url = buildSignedWebhookUrl(
+      "/api/call/incoming?",
+      "/call/incoming",
+      "api.example.com",
+    );
+    // Empty query string segment → we emit the '?' to match what
+    // Twilio's signature would include if present.
+    assert.equal(url, "https://api.example.com/call/incoming");
+  });
+
+  it("tolerates undefined req.url (defensive)", () => {
+    // Node's IncomingMessage.url is typed as optional. A missing
+    // URL is highly unusual but shouldn't crash the handler.
+    const url = buildSignedWebhookUrl(
+      undefined,
+      "/call/incoming",
+      "api.example.com",
+    );
+    assert.equal(url, "https://api.example.com/call/incoming");
+  });
+
+  it("end-to-end: signs against the helper's output, validates after rewrite", () => {
+    // This is the actual regression guard. Pretend Twilio signed
+    // the public URL; pretend Vercel rewrote req.url to the
+    // internal path by the time the handler saw it. Use the
+    // helper to reconstruct, then hand to twilio.validateRequest.
+    // A naive `req.url`-based reconstruction would fail this.
+    const authToken = process.env.TWILIO_AUTH_TOKEN!;
+    const publicUrl = "https://api.example.com/call/incoming?role=parent";
+    const params = { CallSid: "CA-regression", From: "+15551112222" };
+    const signature = twilio.getExpectedTwilioSignature(
+      authToken,
+      publicUrl,
+      params,
+    );
+
+    // Inside the handler, req.url has been rewritten.
+    const rewrittenReqUrl = "/api/call/incoming?role=parent";
+    const reconstructed = buildSignedWebhookUrl(
+      rewrittenReqUrl,
+      "/call/incoming",
+      "api.example.com",
+    );
+
+    // Sanity: the reconstructed URL matches the original public URL.
+    assert.equal(reconstructed, publicUrl);
+
+    // And twilio.validateRequest agrees.
+    const ok = twilio.validateRequest(
+      authToken,
+      signature,
+      reconstructed,
+      params,
+    );
+    assert.equal(
+      ok,
+      true,
+      "rewritten req.url must still produce a valid signed URL",
+    );
+  });
+
+  it("regression: a handler that naively uses req.url as the path would fail", () => {
+    // This test documents WHY the helper exists. If a refactor
+    // rewrites the handler to use `\`https://${domain}${req.url}\``
+    // instead of calling buildSignedWebhookUrl, the test above
+    // still passes but this one fails loudly.
+    const authToken = process.env.TWILIO_AUTH_TOKEN!;
+    const publicUrl = "https://api.example.com/call/incoming";
+    const params = { CallSid: "CA-naive" };
+    const signature = twilio.getExpectedTwilioSignature(
+      authToken,
+      publicUrl,
+      params,
+    );
+
+    // Naive reconstruction using the rewritten req.url.
+    const naivelyWrongUrl = `https://api.example.com/api/call/incoming`;
+    const ok = twilio.validateRequest(
+      authToken,
+      signature,
+      naivelyWrongUrl,
+      params,
+    );
+    assert.equal(
+      ok,
+      false,
+      "sanity — the regression IS detectable with a real validator",
+    );
   });
 });

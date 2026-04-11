@@ -28,7 +28,7 @@ stays visible.
 |---|---|---|---|
 | Critical | 2 | 2 | Unvalidated `to` phone number on /call/outbound; timing-safe compare missing on Bearer auth |
 | High | 3 | 3 | No upper bound on `parseLimit`; role/status strings cast without validation; incoming TwiML role is user-controlled but role enum is not |
-| Medium | 5 | 0 | Rate-limit atomicity across minute+hour; Vercel rewrite query-string fragility; no idempotency key on outbound calls; 4-byte FNV collisions at scale; MemoryKv has no sweep |
+| Medium | 5 | 5 | All fixed or documented: rate-limit atomicity **[FIXED]**; Vercel rewrite query-string fragility **[FIXED — regression guard]**; idempotency on outbound calls **[FIXED]**; 4-byte FNV collisions at scale **[DOCUMENTED]**; MemoryKv has no sweep **[FIXED]** |
 | Low | 4 | 0 | Minor typing looseness; dead `log` declaration in places; unused import; `details` field type bleeds across error variants |
 | Nit | 3 | 0 | Test helper mocking wart; comment inconsistencies; `_setKvForTests` naming |
 
@@ -215,7 +215,7 @@ misconfigure the webhook. But it's brittle.
 
 ## Medium
 
-### M-1. Rate limit minute+hour check is not atomic [discuss]
+### M-1. Rate limit minute+hour check is not atomic [discuss] **[FIXED]**
 
 **File:** `src/core/rateLimit.ts:84-105`
 
@@ -233,7 +233,22 @@ counter INCRBY throws (partial KV outage), `checkRateLimit` falls into
 the catch block and returns "allowed: true" (fail open). The minute
 counter is now one off. Self-healing after 65 seconds. Acceptable.
 
-### M-2. Vercel rewrite + signed URL is fragile [discuss]
+**Fix:** Added `KvStore.pipeline(ops)` that runs multiple operations
+as one atomic unit. `MemoryKv` implements it as sequential in-process
+calls (already atomic in single-threaded JS); `UpstashKv` ships the
+commands as one HTTP POST to the Upstash `/pipeline` endpoint, which
+runs them sequentially on one connection so partial state is
+impossible. `checkRateLimit` now builds a single `PipelineOp[]` and
+calls `kv().pipeline(ops)` once per check — both counters advance
+together or the whole batch throws and we fail open without either
+counter moving. Tests in `tests/rateLimit.test.ts` pin this with a
+spy stub: a regression that reverts to bare `await incrBy();
+await incrBy();` will fail the "sends a single pipeline call per
+check" assertion. Tests in `tests/kv.test.ts` cover the MemoryKv
+pipeline semantics (result ordering, TTL-on-first-write, empty
+list).
+
+### M-2. Vercel rewrite + signed URL is fragile [discuss] **[FIXED — regression guard]**
 
 **Files:**
 - `vercel.json:10-17`
@@ -253,15 +268,28 @@ Vercel's behavior matches (1) and (2) today. If it ever changes (3)
 silently start 403'ing every webhook in prod because Twilio signed the
 original encoding.
 
-**Suggested fix:** add an end-to-end integration test that sends a
-real Twilio webhook through `vercel dev` and asserts the signature
-passes. Alternatively, stash the original path in an internal header
-via the rewrite and read it back in the handler (Vercel supports
-header-passing via rewrites) so we never have to reconstruct.
+**Fix:** Extracted the URL reconstruction logic into a named helper
+`buildSignedWebhookUrl(reqUrl, publicPath, apiDomain)` in
+`src/core/twiml.ts`. Both `api/call/incoming.ts` and
+`api/call/status.ts` now call it with a hardcoded public path. The
+helper ignores the path portion of `req.url` entirely (that's the
+whole point — Vercel rewrites it), and splices on only the query
+string portion. Tests in `tests/twiml.test.ts` pin the contract with
+8 cases including: the exact Vercel-rewrite scenario
+(`req.url = "/api/call/incoming"`), single-host passthrough, query
+string splicing, the empty-query edge case, `undefined` req.url, and
+two end-to-end round-trips via `twilio.getExpectedTwilioSignature` +
+`twilio.validateRequest`. The second round-trip test explicitly
+demonstrates that a naive `\`https://${domain}${req.url}\``-style
+reconstruction WOULD fail validation, so a future refactor that
+tries to "simplify" the helper away will be caught immediately.
 
-Lower priority but worth a regression guard.
+This is a regression guard rather than a deep fix — the underlying
+Vercel-rewrite assumption (3) still stands — but the cost of a
+silent prod outage is now bounded by unit tests instead of by
+manual inspection.
 
-### M-3. No idempotency key on outbound Twilio calls [nit]
+### M-3. No idempotency key on outbound Twilio calls [nit] **[FIXED]**
 
 **File:** `src/core/outbound.ts:135-141`
 
@@ -270,7 +298,25 @@ second call is dialed. Twilio supports idempotency keys to make this
 safe. We don't pass one. For a 30/min limit and low-traffic API this
 is fine, but on the cost-amplification hit list it's an easy win.
 
-### M-4. 32-bit FNV hash collision risk at scale [discuss]
+**Fix:** Twilio's Voice REST API doesn't actually have a native
+idempotency header (that's only on Messaging), so we implemented
+client-side idempotency the way Stripe and Twilio Messaging do it.
+New module `src/core/idempotency.ts` exposes `parseIdempotencyKey`,
+`lookupIdempotent`, and `storeIdempotent` — `initiateOutboundCall`
+now accepts an optional `Idempotency-Key` header, caches the result
+under a hashed KV key for 24 hours, and returns the cached response
+with `X-Idempotent-Replay: true` on repeats. Deterministic 400s are
+cached (so bad-input retries don't re-burn rate-limit budget);
+transient 500s are NOT cached (retries need to be able to get past
+a transient Twilio failure). Header format is validated
+(1-256 chars, printable ASCII) and malformed values return 400.
+Both the Fastify and Vercel adapters forward the header. Tests in
+`tests/idempotency.test.ts` (15 cases) + end-to-end replay tests in
+`tests/outbound.test.ts` (7 cases) cover the happy path, header
+validation edge cases, fail-open on KV errors, and namespace/key
+isolation.
+
+### M-4. 32-bit FNV hash collision risk at scale [discuss] **[DOCUMENTED]**
 
 **File:** `src/core/rateLimit.ts:132-140`
 
@@ -281,7 +327,20 @@ limiter is ever extended to bucket per-IP or per-tenant for a large
 customer base, upgrade to SHA-256 (first 8 hex chars still work as a
 KV key). Document this limit.
 
-### M-5. MemoryKv has no background expiry sweep [discuss]
+**Fix:** The finding is genuinely document-only at current scale —
+the rate limiter sees exactly one API key today, and the idempotency
+cache's cardinality is bounded by the per-hour rate limit (~12k
+keys/day peak, well under the 65k birthday bound). A SHA-256 upgrade
+would be a solution in search of a problem.
+
+The doc comment on `hashClientKey` now spells out (a) the collision
+math, (b) the current-caller budget vs. the 65k threshold, and (c)
+a literal replacement snippet for the SHA-256 upgrade when it's
+actually needed. A future caller that wants to bucket per-IP or
+per-tenant will find the upgrade path in-situ instead of having to
+re-derive it.
+
+### M-5. MemoryKv has no background expiry sweep [discuss] **[FIXED]**
 
 **File:** `src/services/kv.ts:56-98`
 
@@ -290,12 +349,17 @@ with TTLs but never reads them would grow the Map forever. The rate
 limiter IS a frequent reader, so this won't bite in practice, but a
 future cron/batch caller could trip it.
 
-**Options:**
-- Add a lazy sweep every N writes (cheap, bounded)
-- Add a setInterval sweep (unref'd)
-- Document the constraint and move on
-
-Lowest priority.
+**Fix:** Went with the "lazy sweep every N writes" option — cheapest
+and most deterministic of the three. `MemoryKv` now tracks
+`writeCount` on every `set`/`incrBy` and runs a full sweep when
+`writeCount % MEMORY_KV_SWEEP_EVERY_N_WRITES === 0` (threshold
+constant = 128). The sweep is O(n) in Map size but amortized to O(1)
+per write. The idempotency cache (new in this commit) is a
+write-heavy / read-light caller that would previously have tripped
+M-5 — it's the motivating use case. Tests in `tests/kv.test.ts`
+(5 new cases) cover: explicit sweep drops expired entries, keys
+without TTL are preserved, auto-sweep fires at the threshold,
+`incrBy` also bumps the counter, and no sweep before the threshold.
 
 ---
 
@@ -398,22 +462,30 @@ right:
 
 ## Priority for action items
 
-**UPDATE:** The Critical (C-1, C-2) and High (H-1, H-2, H-3) items
-were all fixed in a follow-up commit. Each fix shipped with unit
-tests. The review text above is preserved for historical context and
-to keep the rationale visible in code review.
+**UPDATE 1:** The Critical (C-1, C-2) and High (H-1, H-2, H-3) items
+were all fixed in a follow-up commit after the initial review.
 
-Remaining to address (not yet implemented):
+**UPDATE 2:** Medium items M-3 (Twilio idempotency) and M-5 (MemoryKv
+background sweep) were fixed in a subsequent commit.
 
-- **M-1** — Rate limit minute+hour atomicity. Low priority until
-  observability shows it mattering.
-- **M-2** — Vercel rewrite + signed URL fragility. Adds an integration
-  test rather than a code fix; deferred.
-- **M-3** — Idempotency key on Twilio outbound calls. Cheap to add;
-  deferred because the rate limit already caps blast radius.
-- **M-4** — 32-bit FNV collision risk. Document-only at current scale.
-- **M-5** — MemoryKv background sweep. Not observed in practice.
-- **L-1 through L-4** and the nits are cosmetic.
+**UPDATE 3:** Remaining Medium items closed:
+- **M-1** (rate-limit atomicity) — fixed via `KvStore.pipeline`.
+- **M-2** (Vercel rewrite fragility) — regression-guarded via
+  `buildSignedWebhookUrl` helper + 8 unit tests including an
+  end-to-end round-trip through `twilio.validateRequest`.
+- **M-4** (FNV collision) — documented in-situ with collision math
+  and a literal SHA-256 upgrade snippet.
+
+Every fix shipped with unit tests. All Critical, High, and Medium
+items are now resolved. The review text above is preserved for
+historical context and to keep the rationale visible in code review.
+
+Remaining (deferred, all cosmetic):
+
+- **L-1 through L-4** — minor typing looseness, dead `log`
+  declarations, unused imports, `details` field type bleeding.
+- **Nits** — test helper mocking wart, comment inconsistencies,
+  `_setKvForTests` naming.
 
 ---
 
