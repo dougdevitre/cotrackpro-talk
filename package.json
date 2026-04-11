@@ -21,19 +21,17 @@
     "@aws-sdk/lib-dynamodb": "^3.1029.0",
     "@fastify/formbody": "^8.0.2",
     "@fastify/websocket": "^11.0.1",
-    "dotenv": "^16.4.7",
+    "dotenv": "^17.4.1",
     "fastify": "^5.2.1",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0",
     "twilio": "^5.4.3",
-    "uuid": "^11.0.5",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",
-    "@types/uuid": "^10.0.0",
     "@types/ws": "^8.5.13",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.3"
+    "typescript": "^6.0.2"
   }
 }

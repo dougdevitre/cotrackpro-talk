@@ -99,6 +99,13 @@ export class FakeAnthropic {
    * Drop-in for the real `streamResponse`. Bound to `this` via the
    * arrow-function form so it can be passed directly as
    * `deps.streamResponse = fake.streamResponse`.
+   *
+   * Faithfully mirrors the real SDK's side-effect: when Claude
+   * emits a tool_use stop_reason, the real `src/services/anthropic.ts`
+   * pushes the assistant tool_use block onto the session's
+   * conversation history BEFORE invoking `callbacks.onToolUse`.
+   * The handler downstream (`sendToolResult`) relies on that push
+   * being present, so the fake has to replicate it.
    */
   streamResponse = async (
     session: CallSession,
@@ -108,20 +115,55 @@ export class FakeAnthropic {
       kind: "streamResponse",
       sessionCallSid: session.callSid,
     });
-    await this.play(this.next(), callbacks);
+    const r = this.next();
+    if (r.type === "toolUse") {
+      // Replicate the real SDK's history push for the tool_use
+      // assistant turn. Content is a structured block list matching
+      // what the real Anthropic SDK produces.
+      session.conversationHistory.push({
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: r.toolUseId,
+            name: r.toolName,
+            input: r.toolInput,
+          },
+        ],
+        timestamp: Date.now(),
+      });
+    }
+    await this.play(r, callbacks);
   };
 
-  /** Drop-in for the real `sendToolResult`. */
+  /**
+   * Drop-in for the real `sendToolResult`. Like the real SDK, this
+   * pushes a user tool_result block onto the session's conversation
+   * history BEFORE streaming Claude's follow-up. The handler treats
+   * that push as already-done and moves straight into waiting for
+   * text deltas.
+   */
   sendToolResult = async (
     session: CallSession,
     toolUseId: string,
-    _toolResult: string,
+    toolResult: string,
     callbacks: StreamCallbacks,
   ): Promise<void> => {
     this.calls.push({
       kind: "sendToolResult",
       sessionCallSid: session.callSid,
       toolUseId,
+    });
+    session.conversationHistory.push({
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: toolUseId,
+          content: toolResult,
+        },
+      ],
+      timestamp: Date.now(),
     });
     await this.play(this.next(), callbacks);
   };

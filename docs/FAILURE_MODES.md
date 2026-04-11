@@ -259,6 +259,38 @@ one in production knows it's a known-unknown, not a mystery.
   `cost.call.summary` lands. A mid-call cost watchdog would catch
   this. Not built.
 
+## Remaining deferred items from prior audits
+
+Tracked here so follow-up sessions know where to look:
+
+- **P-2 (end-to-end integration tests)** — substantially closed. The
+  `tests/callHandler.test.ts` characterization suite now covers the
+  inbound happy path, barge-in, Claude tool-use round-trip, Anthropic
+  stream error fallback, and session-cap reject. The DI seam in
+  `src/handlers/callHandler.ts` plus `tests/fakes/` make additional
+  scenarios trivial to add. What's NOT covered: tests that
+  exercise the real Anthropic + ElevenLabs + Twilio stack end-to-end
+  (those need a staged deploy + real call, not a unit test).
+
+- **E-6 / A-6 (`callHandler.ts` refactor)** — still open. The 660-line
+  handler is now protected by five characterization tests, so the
+  refactor has a safety net. The recommended next move: extract pure
+  functions for audio buffer management, barge-in state machine, and
+  sentence-piped callbacks into `src/core/`, leaving the WS event
+  glue in `callHandler.ts`. Along the way, fix the latent eager-parallel
+  TTS orphan pattern documented in the scenario-1 golden record.
+  Explicitly deferred from the current PR because it wants a dedicated
+  session with careful staging.
+
+- **Graceful fallback utterances (from the Anthropic/MCP failure
+  sections above).** The Anthropic error characterization test
+  locks in that the handler DOES play `ERROR_GENERIC_TEXT` through
+  live TTS on Claude failure, so technically this "remaining item"
+  is half-done — the fallback exists, it's just a bit blunt (same
+  text for every kind of error). A richer error-recovery story
+  (Claude 429 vs timeout vs 500 each get different copy) is a
+  future enhancement.
+
 ## Reviewing this document
 
 Add a new entry every time a new failure mode is encountered in
