@@ -325,36 +325,44 @@ describe("handleCallStream — characterization tests", () => {
     sttFake.emitFinal("I need help with documentation.");
 
     // Wait for the handler to finish processing the utterance.
-    // GOLDEN RECORD: the current production behavior is that Claude's
-    // text response ends up on the GREETING TTS stream (index 0),
-    // not a new one, because `currentTts` is sticky across utterances.
-    // `processUserUtterance` DOES eagerly create a second TTS stream
-    // (ttsCreated[1]) via `createTtsStream()` — see the comment in
-    // callHandler.ts — but the sentence-piping callbacks only swap to
-    // it when `currentTts` is falsy, which it isn't after a greeting
-    // via `speak()`. So the second stream is created, connected, and
-    // then effectively unused in the happy path. This is a latent
-    // resource-leak pattern but it's current production behavior; we
-    // lock it in here so any future change surfaces as an explicit
-    // test failure rather than a silent behavior shift.
+    //
+    // GOLDEN RECORD (updated): before the refactor shipped alongside
+    // this update, `processUserUtterance` used to eagerly create a
+    // second TTS stream in parallel with the Claude call via a
+    // now-deleted `const ttsReady = createTtsStream()` line. That
+    // second stream was connected and then never used, because the
+    // sentence-piping `if (!currentTts)` check was always falsy once
+    // the greeting had set `currentTts`. The orphaned stream leaked
+    // until call end.
+    //
+    // The refactor removed the eager creation; `makeSentencePipedCallbacks`
+    // now lazily creates a TTS stream only if `currentTts` is null
+    // when a delta arrives (never happens in the current call flow,
+    // but kept as a defensive fallback). Net observable change:
+    // one TTS stream is created per call (the greeting one), and it
+    // receives BOTH the greeting text AND the first utterance's
+    // Claude response. The golden record is simpler as a result.
+    //
+    // If a future refactor re-introduces multiple streams (e.g. one
+    // per utterance), that's a behavioral change that needs its own
+    // deliberate golden-record update.
     await waitFor(
       () => {
-        // The Claude text should appear in the combined textSent of
-        // whichever stream(s) the handler routed it to.
         const allText = wiring.ttsCreated
           .flatMap((t) => t.textSent)
           .join("");
         return allText.includes("Of course");
       },
-      { label: "Claude response text forwarded to some TTS stream" },
+      { label: "Claude response text forwarded to the greeting TTS stream" },
     );
 
-    // Two TTS streams should have been created: [0] greeting,
-    // [1] eager-parallel for the utterance (goes unused).
+    // Exactly one TTS stream should have been created: the greeting
+    // stream, which is reused for the first utterance's Claude
+    // response. This is the post-refactor state — zero orphans.
     assert.equal(
       wiring.ttsCreated.length,
-      2,
-      "expected 2 TTS streams: greeting + eager-parallel for utterance",
+      1,
+      "expected 1 TTS stream: greeting reused for utterance (post-refactor)",
     );
 
     // FakeAnthropic should have been called once.
@@ -366,33 +374,20 @@ describe("handleCallStream — characterization tests", () => {
     );
     assert.equal(wiring.anthropicFake.pending(), 0);
 
-    // GOLDEN RECORD: the greeting TTS stream (index 0) is where the
-    // Claude response is actually sent, because of the sticky
-    // currentTts pattern described above.
+    // The greeting TTS stream receives BOTH the greeting text AND
+    // the Claude response. This is the intended "reuse" pattern —
+    // keeping the same TTS WebSocket open across multiple
+    // generations avoids per-utterance handshake latency.
     const greetingStream = wiring.ttsCreated[0]!;
-    const eagerUnusedStream = wiring.ttsCreated[1]!;
-
-    // Greeting text + Claude response both land on the same stream.
     const greetingJoined = greetingStream.textSent.join("");
     assert.ok(
       greetingJoined.includes("CoTrack Pro"),
-      "greeting text should be in stream 0",
+      "greeting text should be in the single TTS stream",
     );
     assert.ok(
       greetingJoined.includes("Of course"),
-      `stream 0 should have received Claude's reply; got: ${JSON.stringify(greetingJoined)}`,
+      `the same stream should have received Claude's reply; got: ${JSON.stringify(greetingJoined)}`,
     );
-
-    // The eager-parallel TTS stream was connected but nothing was
-    // written to it (sticky-currentTts bypass). This is the golden
-    // record of the latent resource-leak pattern.
-    assert.equal(eagerUnusedStream.connected, true);
-    assert.deepEqual(
-      eagerUnusedStream.textSent,
-      [],
-      "eager TTS stream should have received NO text (sticky currentTts bypass)",
-    );
-    assert.equal(eagerUnusedStream.flushed, false);
 
     // Session conversation history should now have: assistant
     // greeting + user turn + assistant reply = 3 entries.
@@ -419,18 +414,12 @@ describe("handleCallStream — characterization tests", () => {
       stop: { accountSid: "ACtest", callSid: "CA-characterization-1" },
     });
 
-    // Cleanup happens synchronously inside the stop case; no waitFor
-    // needed. Verify STT + TTS are closed. Note: cleanup only closes
-    // the currently-referenced currentTts (the greeting stream). The
-    // eager-parallel stream at index 1 is orphaned — another data
-    // point for the latent leak pattern.
+    // Cleanup happens synchronously inside the stop case. Verify
+    // STT + the single TTS stream are closed. Since the refactor
+    // removed the orphan, there's no "second stream that never gets
+    // closed" to assert anymore — the golden record is simpler.
     assert.equal(sttFake.closed, true);
     assert.equal(greetingStream.closed, true);
-    assert.equal(
-      eagerUnusedStream.closed,
-      false,
-      "eager-parallel TTS stream is never closed — golden record of the orphan",
-    );
     assert.equal(getSession("CA-characterization-1"), undefined);
   });
 

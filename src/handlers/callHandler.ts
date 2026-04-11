@@ -391,8 +391,28 @@ export async function handleCallStream(
   // ── Helper: build sentence-piped StreamCallbacks ─────────────────────────
   // Extracted from processUserUtterance to avoid duplicating the sentence
   // buffer + flush timer + TTS piping logic between primary and tool paths.
+  //
+  // PR #16's scenario 1 characterization test documented a latent
+  // orphan-TTS bug: the old signature took a `ttsReady: Promise<TtsStreamLike>`
+  // parameter that was eagerly created by `processUserUtterance` before
+  // calling `streamResponse`. But the `if (!currentTts)` check inside
+  // `onTextDelta` was always falsy in practice (because the greeting
+  // path always sets `currentTts` via `speak()` before we arrive here),
+  // so the eager stream was connected and then never used — leaking on
+  // every utterance until the call ended. The characterization test
+  // locked that pattern in as the current behavior so a deliberate fix
+  // would surface as a test failure.
+  //
+  // This is the deliberate fix: the parameter is gone, and the inside
+  // of each callback creates a TTS stream lazily on demand — but only
+  // when there truly isn't one (i.e. never, in the current call flow).
+  // If a future caller invokes `makeSentencePipedCallbacks` with
+  // `currentTts === null` — e.g. a hypothetical "no greeting"
+  // experiment — the lazy creation will still work correctly.
+  //
+  // Scenario 1's golden record was updated in the same PR to reflect
+  // the single-stream observable behavior.
   function makeSentencePipedCallbacks(
-    ttsReady: Promise<TtsStreamLike>,
     callLog: { info: (...args: unknown[]) => void; error: (...args: unknown[]) => void },
     onDone: (fullText: string) => void,
     onFail: (err: Error) => void,
@@ -402,9 +422,14 @@ export async function handleCallStream(
 
     return {
       onTextDelta: async (delta) => {
-        // Ensure TTS is connected before sending the first delta
+        // Lazy TTS creation: in the current call flow `currentTts` is
+        // always truthy here (set by the greeting path or the tool-use
+        // recovery path), so this branch is never taken. Kept for
+        // defensive correctness — if a future code path arrives with
+        // `currentTts === null`, we'll create one on demand rather
+        // than crash.
         if (!currentTts) {
-          currentTts = await ttsReady;
+          currentTts = await createTtsStream();
         }
         if (!firstDeltaReceived) {
           firstDeltaReceived = true;
@@ -426,8 +451,12 @@ export async function handleCallStream(
 
       onComplete: async (fullText) => {
         clearFlushTimer();
+        // Same defensive-lazy pattern: create a TTS only if we
+        // somehow arrived without one (never happens in the current
+        // flow, but we'd rather crash-loop the current call than
+        // undefined-deref the TTS reference).
         if (!currentTts) {
-          currentTts = await ttsReady;
+          currentTts = await createTtsStream();
         }
         if (sentenceBuffer.trim()) {
           currentTts.sendText(sentenceBuffer + " ");
@@ -471,12 +500,15 @@ export async function handleCallStream(
     callLog.info({ utterance: text }, "Processing user utterance");
 
     try {
-      // Start TTS connection and Anthropic stream in parallel.
-      const ttsReady = createTtsStream();
+      // Reset sentence buffer for this utterance. We no longer pre-
+      // create a TTS stream here — the previous pattern eagerly
+      // connected one in parallel with Claude but never used it
+      // because the greeting path already set `currentTts`. The
+      // lazy path inside makeSentencePipedCallbacks handles any
+      // real cold-start case.
       sentenceBuffer = "";
 
       const callbacks = makeSentencePipedCallbacks(
-        ttsReady,
         callLog,
         (fullText) => {
           session!.conversationHistory.push({
@@ -527,12 +559,14 @@ export async function handleCallStream(
             success: !result.startsWith("Error:") && !result.startsWith("Tool call failed"),
           }).catch(() => {});
 
-          // Stream the follow-up through a fresh TTS connection
+          // Stream the follow-up through a fresh TTS connection.
+          // `currentTts` is assigned here explicitly so the
+          // lazy-create branch inside makeSentencePipedCallbacks
+          // never fires — we want the exact stream we just built.
           currentTts = await createTtsStream();
           sentenceBuffer = "";
 
           const toolCallbacks = makeSentencePipedCallbacks(
-            Promise.resolve(currentTts),
             callLog,
             (fullText) => {
               session!.conversationHistory.push({
