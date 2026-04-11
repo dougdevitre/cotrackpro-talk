@@ -1,0 +1,22 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "buildCommand": null,
+  "installCommand": "npm install",
+  "functions": {
+    "api/**/*.ts": {
+      "runtime": "@vercel/node@5",
+      "maxDuration": 30
+    }
+  },
+  "rewrites": [
+    { "source": "/call/incoming", "destination": "/api/call/incoming" },
+    { "source": "/call/status", "destination": "/api/call/status" },
+    { "source": "/call/outbound", "destination": "/api/call/outbound" },
+    { "source": "/health", "destination": "/api/health" },
+    { "source": "/records", "destination": "/api/records" },
+    { "source": "/records/by-role/:role", "destination": "/api/records/by-role/:role" },
+    { "source": "/records/by-status/:status", "destination": "/api/records/by-status/:status" },
+    { "source": "/records/:callSid", "destination": "/api/records/:callSid" }
+  ]
+}
