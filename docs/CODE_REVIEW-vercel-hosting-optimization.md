@@ -28,7 +28,7 @@ stays visible.
 |---|---|---|---|
 | Critical | 2 | 2 | Unvalidated `to` phone number on /call/outbound; timing-safe compare missing on Bearer auth |
 | High | 3 | 3 | No upper bound on `parseLimit`; role/status strings cast without validation; incoming TwiML role is user-controlled but role enum is not |
-| Medium | 5 | 0 | Rate-limit atomicity across minute+hour; Vercel rewrite query-string fragility; no idempotency key on outbound calls; 4-byte FNV collisions at scale; MemoryKv has no sweep |
+| Medium | 5 | 2 | Rate-limit atomicity across minute+hour; Vercel rewrite query-string fragility; no idempotency key on outbound calls **[FIXED]**; 4-byte FNV collisions at scale; MemoryKv has no sweep **[FIXED]** |
 | Low | 4 | 0 | Minor typing looseness; dead `log` declaration in places; unused import; `details` field type bleeds across error variants |
 | Nit | 3 | 0 | Test helper mocking wart; comment inconsistencies; `_setKvForTests` naming |
 
@@ -261,7 +261,7 @@ header-passing via rewrites) so we never have to reconstruct.
 
 Lower priority but worth a regression guard.
 
-### M-3. No idempotency key on outbound Twilio calls [nit]
+### M-3. No idempotency key on outbound Twilio calls [nit] **[FIXED]**
 
 **File:** `src/core/outbound.ts:135-141`
 
@@ -269,6 +269,24 @@ If a client retries a POST /call/outbound due to a network blip, a
 second call is dialed. Twilio supports idempotency keys to make this
 safe. We don't pass one. For a 30/min limit and low-traffic API this
 is fine, but on the cost-amplification hit list it's an easy win.
+
+**Fix:** Twilio's Voice REST API doesn't actually have a native
+idempotency header (that's only on Messaging), so we implemented
+client-side idempotency the way Stripe and Twilio Messaging do it.
+New module `src/core/idempotency.ts` exposes `parseIdempotencyKey`,
+`lookupIdempotent`, and `storeIdempotent` — `initiateOutboundCall`
+now accepts an optional `Idempotency-Key` header, caches the result
+under a hashed KV key for 24 hours, and returns the cached response
+with `X-Idempotent-Replay: true` on repeats. Deterministic 400s are
+cached (so bad-input retries don't re-burn rate-limit budget);
+transient 500s are NOT cached (retries need to be able to get past
+a transient Twilio failure). Header format is validated
+(1-256 chars, printable ASCII) and malformed values return 400.
+Both the Fastify and Vercel adapters forward the header. Tests in
+`tests/idempotency.test.ts` (15 cases) + end-to-end replay tests in
+`tests/outbound.test.ts` (7 cases) cover the happy path, header
+validation edge cases, fail-open on KV errors, and namespace/key
+isolation.
 
 ### M-4. 32-bit FNV hash collision risk at scale [discuss]
 
@@ -281,7 +299,7 @@ limiter is ever extended to bucket per-IP or per-tenant for a large
 customer base, upgrade to SHA-256 (first 8 hex chars still work as a
 KV key). Document this limit.
 
-### M-5. MemoryKv has no background expiry sweep [discuss]
+### M-5. MemoryKv has no background expiry sweep [discuss] **[FIXED]**
 
 **File:** `src/services/kv.ts:56-98`
 
@@ -290,12 +308,17 @@ with TTLs but never reads them would grow the Map forever. The rate
 limiter IS a frequent reader, so this won't bite in practice, but a
 future cron/batch caller could trip it.
 
-**Options:**
-- Add a lazy sweep every N writes (cheap, bounded)
-- Add a setInterval sweep (unref'd)
-- Document the constraint and move on
-
-Lowest priority.
+**Fix:** Went with the "lazy sweep every N writes" option — cheapest
+and most deterministic of the three. `MemoryKv` now tracks
+`writeCount` on every `set`/`incrBy` and runs a full sweep when
+`writeCount % MEMORY_KV_SWEEP_EVERY_N_WRITES === 0` (threshold
+constant = 128). The sweep is O(n) in Map size but amortized to O(1)
+per write. The idempotency cache (new in this commit) is a
+write-heavy / read-light caller that would previously have tripped
+M-5 — it's the motivating use case. Tests in `tests/kv.test.ts`
+(5 new cases) cover: explicit sweep drops expired entries, keys
+without TTL are preserved, auto-sweep fires at the threshold,
+`incrBy` also bumps the counter, and no sweep before the threshold.
 
 ---
 
@@ -398,10 +421,15 @@ right:
 
 ## Priority for action items
 
-**UPDATE:** The Critical (C-1, C-2) and High (H-1, H-2, H-3) items
-were all fixed in a follow-up commit. Each fix shipped with unit
-tests. The review text above is preserved for historical context and
-to keep the rationale visible in code review.
+**UPDATE 1:** The Critical (C-1, C-2) and High (H-1, H-2, H-3) items
+were all fixed in a follow-up commit after the initial review.
+
+**UPDATE 2:** Medium items M-3 (Twilio idempotency) and M-5 (MemoryKv
+background sweep) were fixed in a subsequent commit. Each fix shipped
+with unit tests.
+
+The review text above is preserved for historical context and to
+keep the rationale visible in code review.
 
 Remaining to address (not yet implemented):
 
@@ -409,10 +437,7 @@ Remaining to address (not yet implemented):
   observability shows it mattering.
 - **M-2** — Vercel rewrite + signed URL fragility. Adds an integration
   test rather than a code fix; deferred.
-- **M-3** — Idempotency key on Twilio outbound calls. Cheap to add;
-  deferred because the rate limit already caps blast radius.
 - **M-4** — 32-bit FNV collision risk. Document-only at current scale.
-- **M-5** — MemoryKv background sweep. Not observed in practice.
 - **L-1 through L-4** and the nits are cosmetic.
 
 ---

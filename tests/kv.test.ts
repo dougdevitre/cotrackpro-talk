@@ -9,7 +9,10 @@
 import "./helpers/setupEnv.js";
 import { describe, it, beforeEach, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
-import { _MemoryKvForTests as MemoryKv } from "../src/services/kv.js";
+import {
+  _MemoryKvForTests as MemoryKv,
+  MEMORY_KV_SWEEP_EVERY_N_WRITES,
+} from "../src/services/kv.js";
 
 describe("MemoryKv", () => {
   let store: InstanceType<typeof MemoryKv>;
@@ -132,6 +135,124 @@ describe("MemoryKv", () => {
     it("is a no-op for missing keys", async () => {
       await store.delete("missing"); // must not throw
       assert.equal(await store.get("missing"), null);
+    });
+  });
+
+  // ── Expiry sweep (M-5) ───────────────────────────────────────────────
+  //
+  // Covers the amortized sweep added to stop a write-heavy,
+  // read-light caller (e.g. the idempotency cache on a busy API)
+  // from growing the Map unboundedly. The sweep runs every
+  // MEMORY_KV_SWEEP_EVERY_N_WRITES writes AND is also force-callable
+  // for direct testing.
+
+  describe("expiry sweep", () => {
+    it("drops expired entries on sweep", async () => {
+      mock.timers.enable({ apis: ["Date"] });
+      mock.timers.setTime(1_000_000);
+
+      await store.set("alive", "1", 60);
+      await store.set("dying", "2", 1);
+
+      mock.timers.tick(2_000); // "dying" now expired
+
+      // Both still physically present (lazy cleanup hasn't kicked in
+      // yet — we haven't read them, and we're nowhere near the sweep
+      // threshold).
+      assert.equal(store._sizeForTests(), 2);
+
+      store._sweepNowForTests();
+
+      // Dying is gone, alive remains.
+      assert.equal(store._sizeForTests(), 1);
+      assert.equal(await store.get("alive"), "1");
+      assert.equal(await store.get("dying"), null);
+    });
+
+    it("leaves keys with no TTL alone", async () => {
+      await store.set("forever", "yes"); // no TTL
+      store._sweepNowForTests();
+      assert.equal(await store.get("forever"), "yes");
+    });
+
+    it("auto-sweeps every N writes", async () => {
+      mock.timers.enable({ apis: ["Date"] });
+      mock.timers.setTime(1_000_000);
+
+      // Plant some TTL-having entries that will expire.
+      for (let i = 0; i < 10; i++) {
+        await store.set("expiring:" + i, "v", 1);
+      }
+      // Add one permanent entry.
+      await store.set("keep", "v");
+
+      mock.timers.tick(2_000); // expire the TTL entries
+
+      // None of the writes above crossed the sweep threshold, so
+      // everything is still physically present.
+      assert.equal(store._sizeForTests(), 11);
+
+      // Now pound on the store until we cross the threshold. Each
+      // write bumps the internal writeCount; the sweep runs when
+      // writeCount % N === 0.
+      const existingWrites = store._writeCountForTests();
+      const needed =
+        MEMORY_KV_SWEEP_EVERY_N_WRITES -
+        (existingWrites % MEMORY_KV_SWEEP_EVERY_N_WRITES);
+      for (let i = 0; i < needed; i++) {
+        // Distinct keys so each set() actually adds a Map entry.
+        // Use a far-future TTL so they stay alive.
+        await store.set("pad:" + i, "v", 3600);
+      }
+
+      // After the crossing-write triggered sweep, the 10 expiring
+      // entries should be gone. `keep` + the `pad:*` entries remain.
+      assert.equal(
+        store._sizeForTests(),
+        1 + needed,
+        "expired entries should have been swept",
+      );
+      assert.equal(await store.get("keep"), "v");
+    });
+
+    it("incrBy also triggers the sweep counter", async () => {
+      mock.timers.enable({ apis: ["Date"] });
+      mock.timers.setTime(1_000_000);
+
+      await store.set("dead:1", "v", 1);
+      await store.set("dead:2", "v", 1);
+      mock.timers.tick(2_000);
+
+      // Push the write counter across the threshold using incrBy.
+      const existingWrites = store._writeCountForTests();
+      const needed =
+        MEMORY_KV_SWEEP_EVERY_N_WRITES -
+        (existingWrites % MEMORY_KV_SWEEP_EVERY_N_WRITES);
+      for (let i = 0; i < needed; i++) {
+        await store.incrBy("counter:" + i, 1, 3600);
+      }
+
+      // The 2 dead entries should have been swept, counter:* entries
+      // are still alive.
+      assert.equal(await store.get("dead:1"), null);
+      assert.equal(await store.get("dead:2"), null);
+    });
+
+    it("does not sweep before the threshold is crossed", async () => {
+      // One write — write counter at 1. Well below the threshold, so
+      // no sweep runs.
+      mock.timers.enable({ apis: ["Date"] });
+      mock.timers.setTime(1_000_000);
+      await store.set("expired", "v", 1);
+      mock.timers.tick(2_000);
+      // Add a handful of non-expired entries that shouldn't trigger
+      // a sweep.
+      for (let i = 0; i < 10; i++) {
+        await store.set("other:" + i, "v");
+      }
+      // "expired" is still physically present even though it's
+      // expired — we haven't swept and we haven't read it.
+      assert.equal(store._sizeForTests(), 11);
     });
   });
 });

@@ -55,7 +55,11 @@ export default async function handler(
     return;
   }
 
+  // Idempotency-Key is forwarded to initiateOutboundCall which
+  // handles lookup + cache on its own. Node's IncomingMessage
+  // lowercases header names.
+  const idempotencyKey = req.headers["idempotency-key"];
   const body = (await parseBody(req)) as unknown as OutboundRequest | undefined;
-  const result = await initiateOutboundCall(body);
+  const result = await initiateOutboundCall(body, idempotencyKey);
   sendResult(res, result);
 }

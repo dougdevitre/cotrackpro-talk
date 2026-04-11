@@ -51,17 +51,58 @@ export interface KvStore {
 
 // ── In-memory backend ───────────────────────────────────────────────────────
 //
-// Per-process Map with explicit expiry. A lazy sweep (on read) removes
-// expired entries; there's no background timer so the store has zero
-// overhead when unused.
+// Per-process Map with explicit expiry. Expired entries are dropped on
+// read (lazy cleanup) AND via an amortized sweep every SWEEP_EVERY_N
+// writes. Previously this only cleaned up on read, which meant a caller
+// that wrote keys-with-TTL and never read them could grow the Map
+// unboundedly. In practice this hasn't bitten because the rate limiter
+// is a heavy reader, but the idempotency cache (which reads only on
+// retries) could have tripped it. M-5 in
+// docs/CODE_REVIEW-vercel-hosting-optimization.md.
 
 type Entry = { value: string; expiresAt: number | null };
 
+/**
+ * How often to run the amortized sweep of expired entries. Every Nth
+ * write (across set + incrBy) triggers a scan-and-delete pass over
+ * the whole Map. 128 is a rough sweet spot: large enough that the
+ * per-write cost is negligible, small enough that an unbounded Map
+ * can't get very large before being trimmed. Exported for tests.
+ */
+export const MEMORY_KV_SWEEP_EVERY_N_WRITES = 128;
+
 class MemoryKv implements KvStore {
   private store = new Map<string, Entry>();
+  private writeCount = 0;
 
   private isExpired(entry: Entry): boolean {
     return entry.expiresAt !== null && Date.now() >= entry.expiresAt;
+  }
+
+  /**
+   * Lazy sweep of expired entries. Called from the write path every
+   * SWEEP_EVERY_N writes. O(n) in the size of the Map but amortized
+   * to O(1) per write. Safe to call concurrently — we're
+   * single-threaded JS, Map iteration during delete is defined
+   * behavior.
+   */
+  private maybeSweep(): void {
+    this.writeCount += 1;
+    if (this.writeCount % MEMORY_KV_SWEEP_EVERY_N_WRITES !== 0) return;
+    this.sweep();
+  }
+
+  /**
+   * Unconditional sweep of expired entries. Exposed for tests via
+   * `_sweepNow` — production code relies on `maybeSweep`.
+   */
+  private sweep(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.store) {
+      if (entry.expiresAt !== null && now >= entry.expiresAt) {
+        this.store.delete(key);
+      }
+    }
   }
 
   async get(key: string): Promise<string | null> {
@@ -79,6 +120,7 @@ class MemoryKv implements KvStore {
       value,
       expiresAt: ttlSeconds ? Date.now() + ttlSeconds * 1000 : null,
     });
+    this.maybeSweep();
   }
 
   async incrBy(
@@ -98,11 +140,34 @@ class MemoryKv implements KvStore {
         ? Date.now() + ttlSeconds * 1000
         : existing?.expiresAt ?? null,
     });
+    this.maybeSweep();
     return next;
   }
 
   async delete(key: string): Promise<void> {
     this.store.delete(key);
+  }
+
+  // ── Test-only helpers ──────────────────────────────────────────
+  //
+  // Exposed for unit tests so we can force-sweep without having to
+  // write 128 entries first, and inspect the internal size without
+  // coupling the test to Map implementation details. DO NOT call
+  // from production code.
+
+  /** Current entry count (including not-yet-swept expired entries). */
+  _sizeForTests(): number {
+    return this.store.size;
+  }
+
+  /** Force an immediate sweep. */
+  _sweepNowForTests(): void {
+    this.sweep();
+  }
+
+  /** Number of writes observed by this instance. */
+  _writeCountForTests(): number {
+    return this.writeCount;
   }
 }
 

@@ -1,0 +1,57 @@
+name: CI
+
+# Run typecheck, build, and unit tests on every PR and every push to main.
+# This is the minimum bar: no deployment, no integration tests, no fancy
+# matrix. Catches obvious breakage before review.
+#
+# Why Node 20: package.json's engines field pins >=20, so that's the
+# minimum supported version. We don't matrix across versions because the
+# code doesn't use any version-specific APIs beyond what node:test and
+# the built-in fetch give us.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel in-progress runs when a new commit is pushed to the same branch.
+# Saves compute and keeps the "latest" status accurate.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: typecheck + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        # Use npm ci for reproducible installs from package-lock.json.
+        # Fails fast if the lockfile is out of sync with package.json.
+        run: npm ci
+
+      - name: Typecheck
+        # tsc --noEmit over both src/ and api/ (see tsconfig.typecheck.json).
+        run: npm run typecheck
+
+      - name: Build
+        # tsc emit to dist/. Catches any rootDir/outDir config drift that
+        # typecheck alone might miss.
+        run: npm run build
+
+      - name: Unit tests
+        # node:test via tsx (see tests/). No env vars required —
+        # tests/helpers/setupEnv.ts stubs the mandatory vars at import.
+        run: npm test
