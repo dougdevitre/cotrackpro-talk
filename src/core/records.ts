@@ -39,12 +39,22 @@ export function authorizeRecords(
   return null;
 }
 
-function encodeCursor(lastKey: Record<string, unknown> | undefined): string | null {
+/** Base64url-encode a DynamoDB lastKey for use as a pagination cursor. */
+export function encodeCursor(
+  lastKey: Record<string, unknown> | undefined,
+): string | null {
   if (!lastKey) return null;
   return Buffer.from(JSON.stringify(lastKey)).toString("base64url");
 }
 
-function decodeCursor(cursor: string | undefined): Record<string, unknown> | undefined {
+/**
+ * Decode a base64url cursor back to a DynamoDB lastKey. Returns
+ * undefined on missing or malformed input — callers should treat
+ * "couldn't decode" the same as "no cursor" (start from the top).
+ */
+export function decodeCursor(
+  cursor: string | undefined,
+): Record<string, unknown> | undefined {
   if (!cursor) return undefined;
   try {
     return JSON.parse(Buffer.from(cursor, "base64url").toString());
@@ -53,7 +63,11 @@ function decodeCursor(cursor: string | undefined): Record<string, unknown> | und
   }
 }
 
-function parseLimit(raw: string | undefined, fallback: number): number {
+/**
+ * Parse a numeric limit query param with a positive-integer guard.
+ * Returns `fallback` for missing, non-numeric, or non-positive input.
+ */
+export function parseLimit(raw: string | undefined, fallback: number): number {
   if (!raw) return fallback;
   const n = parseInt(raw, 10);
   return Number.isFinite(n) && n > 0 ? n : fallback;

@@ -9,6 +9,7 @@
     "dev": "tsx watch src/index.ts",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "test": "node --import tsx --test tests/*.test.ts",
     "generate-audio": "tsx scripts/generate-prerecorded.ts"
   },
   "engines": {

@@ -216,3 +216,14 @@ export function kv(): KvStore {
 export function _resetKvForTests(): void {
   _kv = null;
 }
+
+/**
+ * Test-only: inject a custom KV implementation (e.g. a stub that
+ * throws, to exercise fail-open behavior). Do not call in production.
+ */
+export function _setKvForTests(store: KvStore): void {
+  _kv = store;
+}
+
+/** Test-only: expose MemoryKv for direct unit tests. */
+export { MemoryKv as _MemoryKvForTests };

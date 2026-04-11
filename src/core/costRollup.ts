@@ -62,7 +62,8 @@ export type RollupResult = {
   pagesRead: number;
 };
 
-function emptyTotals(): RollupTotals {
+/** Return a zeroed RollupTotals. Exported for test use. */
+export function emptyTotals(): RollupTotals {
   return {
     callCount: 0,
     totalDurationSecs: 0,
@@ -77,6 +78,17 @@ function emptyTotals(): RollupTotals {
     estimatedCostUsd: 0,
     byRole: {},
   };
+}
+
+/**
+ * Aggregate a list of call records into a totals struct. The DynamoDB
+ * path (`computeCostRollup`) pages through records and feeds each page
+ * through this function; tests can call it directly with fixtures.
+ */
+export function aggregateRecords(records: CallRecord[]): RollupTotals {
+  const totals = emptyTotals();
+  for (const record of records) addRecord(totals, record);
+  return totals;
 }
 
 function addRecord(totals: RollupTotals, record: CallRecord): void {
