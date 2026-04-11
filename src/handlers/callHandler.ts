@@ -43,10 +43,16 @@ import {
   touchSession,
 } from "../utils/sessions.js";
 import { logger } from "../utils/logger.js";
-import { ElevenLabsStream } from "../services/elevenlabs.js";
-import { STTStream } from "../services/stt.js";
-import { streamResponse, sendToolResult } from "../services/anthropic.js";
-import { callMCPTool } from "../services/mcp.js";
+import {
+  ElevenLabsStream,
+  type ElevenLabsStreamOptions,
+} from "../services/elevenlabs.js";
+import { STTStream, type STTStreamOptions } from "../services/stt.js";
+import {
+  streamResponse as realStreamResponse,
+  sendToolResult as realSendToolResult,
+} from "../services/anthropic.js";
+import { callMCPTool as realCallMCPTool } from "../services/mcp.js";
 import {
   createCallRecord,
   completeCallRecord,
@@ -65,6 +71,69 @@ import {
   ERROR_TOOL_TEXT,
 } from "../audio/prerecorded.js";
 import { estimateCallCost } from "../utils/costEstimator.js";
+
+// ── Dependency-injection seam for tests ────────────────────────────────────
+//
+// `handleCallStream` depends on several stateful external services
+// (ElevenLabs TTS, ElevenLabs STT, Anthropic Claude streaming, MCP
+// tool calls). All of them touch real network endpoints and can't
+// be driven from a unit test. This interface lets a characterization
+// test inject fake replacements so the whole call pipeline can run
+// in-process against scripted inputs.
+//
+// Production callers omit `depsOverride` and get the real
+// implementations via `defaultDeps()`. Tests pass a `Partial<CallHandlerDeps>`
+// with the fakes they care about; anything omitted falls through to
+// the real implementation.
+//
+// The interfaces use structural typing (`TtsStreamLike`, `SttStreamLike`)
+// so fakes don't have to extend the real classes — they just need to
+// implement the method surface `handleCallStream` actually uses.
+// See tests/fakes/ for the in-test implementations.
+
+/** The subset of `ElevenLabsStream` that `handleCallStream` uses. */
+export interface TtsStreamLike {
+  connect(): Promise<void>;
+  sendText(text: string): void;
+  flush(): void;
+  close(): void;
+}
+
+/** The subset of `STTStream` that `handleCallStream` uses. */
+export interface SttStreamLike {
+  connect(): Promise<void>;
+  sendAudio(base64Audio: string): void;
+  close(): void;
+}
+
+/**
+ * The external collaborators `handleCallStream` needs. Tests override
+ * any subset via the `depsOverride` parameter below; production uses
+ * `defaultDeps()`.
+ */
+export interface CallHandlerDeps {
+  /** Factory for a new TTS stream. Called once per utterance. */
+  makeTtsStream: (opts: ElevenLabsStreamOptions) => TtsStreamLike;
+  /** Factory for the STT stream. Called once per call in the `start` case. */
+  makeSttStream: (opts: STTStreamOptions) => SttStreamLike;
+  /** Stream a Claude response through to the supplied callbacks. */
+  streamResponse: typeof realStreamResponse;
+  /** Send a tool result and stream Claude's follow-up. */
+  sendToolResult: typeof realSendToolResult;
+  /** Invoke the CoTrackPro MCP server. */
+  callMcpTool: typeof realCallMCPTool;
+}
+
+/** Real-implementation defaults. The only values used in production. */
+function defaultDeps(): CallHandlerDeps {
+  return {
+    makeTtsStream: (opts) => new ElevenLabsStream(opts),
+    makeSttStream: (opts) => new STTStream(opts),
+    streamResponse: realStreamResponse,
+    sendToolResult: realSendToolResult,
+    callMcpTool: realCallMCPTool,
+  };
+}
 
 // ── Role-adaptive, trauma-informed greetings ─────────────────────────────────
 function getRoleGreeting(role: CoTrackProRole): string {
@@ -126,7 +195,13 @@ const SENTENCE_FLUSH_TIMEOUT_MS = 500;
 /**
  * Handle a Twilio bidirectional media stream WebSocket connection.
  */
-export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
+export async function handleCallStream(
+  twilioWs: WebSocket,
+  depsOverride?: Partial<CallHandlerDeps>,
+): Promise<void> {
+  // Merge real defaults with any test-supplied overrides. Production
+  // callers pass nothing and get the real services.
+  const deps: CallHandlerDeps = { ...defaultDeps(), ...depsOverride };
   const log = logger.child({ handler: "callStream" });
 
   // ── E-2: Concurrent-session cap ─────────────────────────────────────
@@ -158,8 +233,10 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
   }
 
   let session: CallSession | undefined;
-  let sttStream: STTStream | undefined;
-  let currentTts: ElevenLabsStream | undefined;
+  // Typed to the `Like` interfaces so test fakes can be assigned here
+  // without extending the real classes.
+  let sttStream: SttStreamLike | undefined;
+  let currentTts: TtsStreamLike | undefined;
   let sentenceBuffer = "";
   let isAssistantSpeaking = false;
   let markCounter = 0;
@@ -210,10 +287,11 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
   }
 
   // ── Helper: create a new TTS stream for an utterance ────────────────────
-  async function createTtsStream(): Promise<ElevenLabsStream> {
+  async function createTtsStream(): Promise<TtsStreamLike> {
     if (!session) throw new Error("No session");
 
-    const tts = new ElevenLabsStream({
+    // Goes through the DI seam so tests can inject a FakeTtsStream.
+    const tts = deps.makeTtsStream({
       voiceId: session.voiceId,
       callSid: session.callSid,
       onAudio: (b64) => {
@@ -314,7 +392,7 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
   // Extracted from processUserUtterance to avoid duplicating the sentence
   // buffer + flush timer + TTS piping logic between primary and tool paths.
   function makeSentencePipedCallbacks(
-    ttsReady: Promise<ElevenLabsStream>,
+    ttsReady: Promise<TtsStreamLike>,
     callLog: { info: (...args: unknown[]) => void; error: (...args: unknown[]) => void },
     onDone: (fullText: string) => void,
     onFail: (err: Error) => void,
@@ -422,7 +500,7 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
         },
       );
 
-      await streamResponse(session, {
+      await deps.streamResponse(session, {
         ...callbacks,
 
         onToolUse: async (toolName, toolInput, toolUseId) => {
@@ -437,7 +515,7 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
 
           // Call the CoTrackPro MCP server
           const mcpStartMs = Date.now();
-          const result = await callMCPTool(toolName, toolInput);
+          const result = await deps.callMcpTool(toolName, toolInput);
           const mcpDurationMs = Date.now() - mcpStartMs;
           callLog.info({ toolName, mcpMs: mcpDurationMs }, "MCP tool call complete");
 
@@ -478,7 +556,7 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
             },
           );
 
-          await sendToolResult(session!, toolUseId, result, toolCallbacks);
+          await deps.sendToolResult(session!, toolUseId, result, toolCallbacks);
         },
       });
     } catch (err) {
@@ -532,8 +610,9 @@ export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
             twilioWs.close();
           });
 
-          // Initialize STT
-          sttStream = new STTStream({
+          // Initialize STT via the DI seam so tests can inject a
+          // FakeSttStream that emits scripted transcripts.
+          sttStream = deps.makeSttStream({
             callSid,
             onPartial: (text) => {
               // Optional: you could use partials for barge-in detection
