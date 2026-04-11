@@ -1,5 +1,8 @@
 /**
- * handlers/records.ts — REST API for call record CRUD
+ * handlers/records.ts — REST API for call record CRUD (Fastify adapter)
+ *
+ * Thin Fastify wrapper around src/core/records.ts. Vercel reuses the
+ * same core in api/records/*.ts.
  *
  * GET    /records/:callSid       — Get a single call record
  * GET    /records                — List recent calls (paginated)
@@ -10,147 +13,75 @@
  * All endpoints require Bearer token auth (same OUTBOUND_API_KEY).
  */
 
-import type { FastifyInstance } from "fastify";
-import { env } from "../config/env.js";
-import { logger } from "../utils/logger.js";
-import type { CoTrackProRole, CallStatus } from "../types/index.js";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
-  getCallRecord,
-  listRecentCalls,
-  listCallsByRole,
-  listCallsByStatus,
-  deleteCallRecord,
-} from "../services/dynamo.js";
+  authorizeRecords,
+  deleteRecord,
+  getRecord,
+  listRecords,
+  listRecordsByRole,
+  listRecordsByStatus,
+  type RecordResult,
+} from "../core/records.js";
 
-const log = logger.child({ handler: "records" });
+function send<T>(reply: FastifyReply, result: RecordResult<T>): FastifyReply {
+  if (result.status === 204) return reply.status(204).send();
+  return reply.status(result.status).send(result.body);
+}
 
 export function registerRecordRoutes(app: FastifyInstance): void {
   // ── Auth hook for all /records routes ──────────────────────────────────
-  app.addHook("preHandler", async (request, reply) => {
+  app.addHook("preHandler", async (request: FastifyRequest, reply: FastifyReply) => {
     if (!request.url.startsWith("/records")) return;
-
-    if (env.outboundApiKey) {
-      const auth = request.headers.authorization;
-      if (!auth || auth !== `Bearer ${env.outboundApiKey}`) {
-        return reply.status(401).send({ error: "Unauthorized" });
-      }
+    const authError = authorizeRecords(request.headers.authorization);
+    if (authError) {
+      return reply.status(authError.status).send(authError.body);
     }
   });
 
-  // ── GET /records/:callSid ─────────────────────────────────────────────
   app.get("/records/:callSid", async (request, reply) => {
     const { callSid } = request.params as { callSid: string };
-
-    if (!callSid) {
-      return reply.status(400).send({ error: "Missing callSid" });
-    }
-
-    const record = await getCallRecord(callSid);
-
-    if (!record) {
-      return reply.status(404).send({ error: "Call record not found" });
-    }
-
-    return reply.send(record);
+    return send(reply, await getRecord(callSid));
   });
 
-  // ── GET /records ──────────────────────────────────────────────────────
   app.get("/records", async (request, reply) => {
-    const query = request.query as {
-      limit?: string;
-      cursor?: string;
-    };
-
-    const limit = query.limit ? parseInt(query.limit, 10) : 25;
-    const lastKey = query.cursor
-      ? JSON.parse(Buffer.from(query.cursor, "base64url").toString())
-      : undefined;
-
-    const result = await listRecentCalls({ limit, lastKey });
-
-    return reply.send({
-      records: result.records,
-      cursor: result.lastKey
-        ? Buffer.from(JSON.stringify(result.lastKey)).toString("base64url")
-        : null,
-    });
+    return send(reply, await listRecords(request.query as { limit?: string; cursor?: string }));
   });
 
-  // ── GET /records/by-role/:role ────────────────────────────────────────
   app.get("/records/by-role/:role", async (request, reply) => {
     const { role } = request.params as { role: string };
-    const query = request.query as {
-      startDate?: string;
-      endDate?: string;
-      limit?: string;
-      cursor?: string;
-    };
-
-    const limit = query.limit ? parseInt(query.limit, 10) : 50;
-    const lastKey = query.cursor
-      ? JSON.parse(Buffer.from(query.cursor, "base64url").toString())
-      : undefined;
-
-    const result = await listCallsByRole(role as CoTrackProRole, {
-      startDate: query.startDate,
-      endDate: query.endDate,
-      limit,
-      lastKey,
-    });
-
-    return reply.send({
-      records: result.records,
-      cursor: result.lastKey
-        ? Buffer.from(JSON.stringify(result.lastKey)).toString("base64url")
-        : null,
-    });
+    return send(
+      reply,
+      await listRecordsByRole(
+        role,
+        request.query as {
+          startDate?: string;
+          endDate?: string;
+          limit?: string;
+          cursor?: string;
+        },
+      ),
+    );
   });
 
-  // ── GET /records/by-status/:status ────────────────────────────────────
   app.get("/records/by-status/:status", async (request, reply) => {
     const { status } = request.params as { status: string };
-    const query = request.query as {
-      startDate?: string;
-      endDate?: string;
-      limit?: string;
-      cursor?: string;
-    };
-
-    const limit = query.limit ? parseInt(query.limit, 10) : 50;
-    const lastKey = query.cursor
-      ? JSON.parse(Buffer.from(query.cursor, "base64url").toString())
-      : undefined;
-
-    const result = await listCallsByStatus(status as CallStatus, {
-      startDate: query.startDate,
-      endDate: query.endDate,
-      limit,
-      lastKey,
-    });
-
-    return reply.send({
-      records: result.records,
-      cursor: result.lastKey
-        ? Buffer.from(JSON.stringify(result.lastKey)).toString("base64url")
-        : null,
-    });
+    return send(
+      reply,
+      await listRecordsByStatus(
+        status,
+        request.query as {
+          startDate?: string;
+          endDate?: string;
+          limit?: string;
+          cursor?: string;
+        },
+      ),
+    );
   });
 
-  // ── DELETE /records/:callSid ──────────────────────────────────────────
   app.delete("/records/:callSid", async (request, reply) => {
     const { callSid } = request.params as { callSid: string };
-
-    if (!callSid) {
-      return reply.status(400).send({ error: "Missing callSid" });
-    }
-
-    const deleted = await deleteCallRecord(callSid);
-
-    if (!deleted) {
-      return reply.status(404).send({ error: "Call record not found" });
-    }
-
-    log.info({ callSid }, "Call record deleted via API");
-    return reply.status(204).send();
+    return send(reply, await deleteRecord(callSid));
   });
 }

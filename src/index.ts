@@ -14,7 +14,7 @@ import fastifyWebSocket from "@fastify/websocket";
 import fastifyFormBody from "@fastify/formbody";
 import { env } from "./config/env.js";
 import { logger } from "./utils/logger.js";
-import { sessionCount, allSessions } from "./utils/sessions.js";
+import { sessionCount } from "./utils/sessions.js";
 import { registerTwimlRoutes } from "./handlers/twiml.js";
 import { registerOutboundRoutes } from "./handlers/outbound.js";
 import { registerRecordRoutes } from "./handlers/records.js";
@@ -56,21 +56,36 @@ async function main() {
   });
 
   // ── Start ─────────────────────────────────────────────────────────────
+  //
+  // In single-host mode (SERVER_DOMAIN set, no API_DOMAIN/WS_DOMAIN) this
+  // process serves everything — HTTP routes + WebSocket — from one host.
+  //
+  // In hybrid mode (API_DOMAIN on Vercel + WS_DOMAIN on a long-running
+  // host) this process's primary role is the WebSocket at /call/stream;
+  // the HTTP routes remain registered for /health and as an optional
+  // fallback, but Twilio should be pointed at API_DOMAIN for webhooks.
+  const isHybrid = env.apiDomain !== env.wsDomain;
+
   try {
     await app.listen({ port: env.port, host: "0.0.0.0" });
     logger.info(
       {
         port: env.port,
-        domain: env.serverDomain,
+        apiDomain: env.apiDomain,
+        wsDomain: env.wsDomain,
+        mode: isHybrid ? "hybrid (Vercel + WS host)" : "single host",
         env: env.nodeEnv,
       },
       `CoTrackPro Voice Center running`,
     );
-    logger.info(`  Twilio webhook:  https://${env.serverDomain}/call/incoming`);
-    logger.info(`  WebSocket:       wss://${env.serverDomain}/call/stream`);
-    logger.info(`  Outbound API:    https://${env.serverDomain}/call/outbound`);
-    logger.info(`  Records API:     https://${env.serverDomain}/records`);
-    logger.info(`  Health:          https://${env.serverDomain}/health`);
+    logger.info(`  WebSocket:       wss://${env.wsDomain}/call/stream`);
+    logger.info(`  Twilio webhook:  https://${env.apiDomain}/call/incoming`);
+    logger.info(`  Outbound API:    https://${env.apiDomain}/call/outbound`);
+    logger.info(`  Records API:     https://${env.apiDomain}/records`);
+    logger.info(`  Health (WS):     https://${env.wsDomain}/health`);
+    if (isHybrid) {
+      logger.info(`  Health (API):    https://${env.apiDomain}/health (Vercel)`);
+    }
     logger.info(`  DynamoDB:        ${env.dynamoEnabled === "true" ? "enabled" : "disabled"}`);
   } catch (err) {
     logger.fatal({ err }, "Failed to start server");

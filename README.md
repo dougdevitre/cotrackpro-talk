@@ -43,27 +43,46 @@ AI-powered contact center that lets callers speak naturally with CoTrackPro pers
 cotrackpro-voice-center/
 ├── package.json
 ├── tsconfig.json
+├── vercel.json                     # Vercel runtime + rewrites (hybrid deploy)
 ├── .env.example
 ├── .gitignore
 ├── README.md
+├── api/                            # Vercel serverless HTTP tier
+│   ├── health.ts
+│   ├── call/
+│   │   ├── incoming.ts             # POST /call/incoming  (TwiML)
+│   │   ├── status.ts               # POST /call/status    (callback)
+│   │   └── outbound.ts             # POST /call/outbound  (initiate call)
+│   └── records/
+│       ├── index.ts                # GET  /records
+│       ├── [callSid].ts            # GET / DELETE /records/:callSid
+│       ├── by-role/[role].ts
+│       └── by-status/[status].ts
 └── src/
-    ├── index.ts                    # Fastify server entrypoint
+    ├── index.ts                    # Fastify server (long-running WS host)
     ├── config/
     │   ├── env.ts                  # Validated env config (fail-fast)
     │   └── voices.ts               # Role → ElevenLabs voice ID mapping
+    ├── core/                       # Framework-agnostic handler logic
+    │   ├── twiml.ts                # TwiML + Twilio signature validation
+    │   ├── outbound.ts             # Outbound call initiation
+    │   ├── records.ts              # DynamoDB record CRUD
+    │   └── httpAdapter.ts          # Node HTTP helpers for Vercel
     ├── types/
     │   └── index.ts                # Shared TypeScript types
     ├── utils/
     │   ├── logger.ts               # Pino structured logging
     │   └── sessions.ts             # In-memory call session store
-    ├── handlers/
-    │   ├── twiml.ts                # POST /call/incoming — TwiML response
-    │   ├── outbound.ts             # POST /call/outbound — dial out
+    ├── handlers/                   # Fastify adapters around src/core/*
+    │   ├── twiml.ts                # POST /call/incoming
+    │   ├── outbound.ts             # POST /call/outbound
+    │   ├── records.ts              # /records REST API
     │   └── callHandler.ts          # WebSocket handler — full pipeline
     └── services/
         ├── anthropic.ts            # Claude streaming + CoTrackPro tools
         ├── elevenlabs.ts           # TTS WebSocket (ulaw_8000)
         ├── stt.ts                  # STT WebSocket (Scribe realtime)
+        ├── dynamo.ts               # DynamoDB call records
         └── mcp.ts                  # CoTrackPro MCP tool client
 ```
 
@@ -158,20 +177,105 @@ Pass `?role=attorney` (or any CoTrackPro role) as a query parameter on the incom
 - [ ] Review CoTrackPro MCP server auth (OAuth 2.0 recommended)
 - [ ] Enable ElevenLabs zero-retention mode for HIPAA if applicable
 
-### AWS deployment (recommended)
+### Deployment options
+
+This repo supports two deployment shapes. Pick based on ops preference — both use the same core handler code in `src/core/`.
+
+#### Option A: Single host (simple)
+
+One long-running container serves both HTTP and WebSocket on `SERVER_DOMAIN`.
 
 ```
-ECS Fargate / EC2
+ECS Fargate / Fly / Render / Railway
   └── ALB (HTTPS, wss://)
-        ├── /call/incoming  → Target Group (HTTP)
-        ├── /call/stream    → Target Group (WebSocket)
-        └── /health         → Target Group (HTTP)
+        ├── /call/incoming  → Fastify HTTP
+        ├── /call/stream    → Fastify WebSocket
+        └── /health         → Fastify HTTP
 ```
 
-- Use ECS Fargate with at least 1 vCPU / 2GB RAM per instance
-- ALB must have WebSocket idle timeout ≥ 3600s (max call duration)
+Env: set `SERVER_DOMAIN=voice.example.com`. Done. Point Twilio at `https://voice.example.com/call/incoming`.
+
+- ECS Fargate: ≥ 1 vCPU / 2 GB RAM per instance (see Fargate rightsizing below for more aggressive options)
+- ALB WebSocket idle timeout ≥ 3600s (max call duration)
 - Sticky sessions NOT required (each WS is self-contained)
 - For multi-instance: use Redis for session store (swap `sessions.ts`)
+
+#### Option B: Hybrid (Vercel HTTP + long-running WS host)
+
+HTTP tier on Vercel (stateless serverless, scales to zero, global edge), WebSocket tier on a long-running host (Fargate/Fly/Render). Twilio hits Vercel for webhooks; the TwiML response points `<Stream url>` at the WS host.
+
+```
+                  Vercel                            Long-running host
+                  (HTTP tier)                       (WebSocket tier)
+┌──────────────────────────────────┐        ┌───────────────────────────────┐
+│ POST /call/incoming  (TwiML)     │        │ WS /call/stream               │
+│ POST /call/status                │        │   Twilio Media Stream ↔       │
+│ POST /call/outbound              │        │   Claude ↔ ElevenLabs ↔ MCP   │
+│ GET  /records/*                  │        │ GET /health                   │
+│ GET  /health                     │        │                               │
+└──────────────────────────────────┘        └───────────────────────────────┘
+          ▲                                             ▲
+          │ HTTPS webhooks                              │ wss:// media stream
+          │                                             │
+          └─────────────────── Twilio ──────────────────┘
+```
+
+**Why hybrid?** Vercel can't host Twilio Media Streams (long-lived bidirectional WebSockets don't fit the serverless model), but it's the best host for the stateless HTTP surface: scale-to-zero, preview deployments per PR, global edge, zero cert management. The long-running host only has to serve the WebSocket, which makes it much easier to right-size.
+
+**Setup:**
+
+1. **Deploy the WebSocket host** (Fargate/Fly/Render/Railway). Run `npm run build && npm start`. Set env:
+   ```
+   SERVER_DOMAIN=ws.example.com     # or set WS_DOMAIN directly
+   # …all other env vars (TWILIO_*, ELEVENLABS_*, ANTHROPIC_*, etc.)
+   ```
+   The Fastify server exposes `wss://ws.example.com/call/stream` and `https://ws.example.com/health`.
+
+2. **Deploy the Vercel project** from the same repo. The `api/` directory and `vercel.json` at the root are detected automatically. Set env on the Vercel project:
+   ```
+   API_DOMAIN=api.example.com       # your Vercel custom domain
+   WS_DOMAIN=ws.example.com         # long-running host from step 1
+   TWILIO_ACCOUNT_SID=…
+   TWILIO_AUTH_TOKEN=…
+   TWILIO_PHONE_NUMBER=…
+   VALIDATE_TWILIO_SIGNATURE=true
+   OUTBOUND_API_KEY=…               # required to call /call/outbound and /records
+   # DynamoDB (if used for /records)
+   DYNAMO_ENABLED=true
+   DYNAMO_TABLE_NAME=cotrackpro-calls
+   AWS_REGION=us-east-1
+   AWS_ACCESS_KEY_ID=…
+   AWS_SECRET_ACCESS_KEY=…
+   # Note: ELEVENLABS_API_KEY / ANTHROPIC_API_KEY / COTRACKPRO_MCP_URL are
+   # NOT needed on the Vercel tier — they're only used by the WS host.
+   ```
+   Vercel builds `api/**/*.ts` on each push using the Node 20 runtime (pinned in `vercel.json`).
+
+3. **Point Twilio webhooks at the Vercel domain:**
+   - A Call Comes In: `https://api.example.com/call/incoming`
+   - Status Callback: `https://api.example.com/call/status`
+
+   Do NOT point Twilio at the WS host for webhooks — use it only for the Media Stream, which the TwiML returned by Vercel automatically directs to `wss://ws.example.com/call/stream`.
+
+**What you gain:**
+
+| Area | Improvement |
+|---|---|
+| HTTP tier cost | Scales to zero — you only pay for actual webhook invocations |
+| Webhook latency | Vercel's global edge serves TwiML from the region closest to Twilio |
+| TLS / cert management | Vercel handles HTTPS + cert rotation automatically |
+| Preview environments | Every branch/PR gets a URL you can point a Twilio subaccount at |
+| Secret management | Per-environment env vars (dev / preview / prod) on Vercel |
+| WS host sizing | Only the WS workload matters — right-size without worrying about HTTP RPS |
+
+**What doesn't change:**
+
+- Anthropic prompt caching (unchanged)
+- Pre-recorded audio cache (unchanged)
+- DynamoDB call records (read from either tier; writes come from the WS host)
+- Per-call dollar cost (Anthropic/ElevenLabs/Twilio still dominate — hosting is rounding error)
+
+**Local development:** set `SERVER_DOMAIN=<ngrok-domain>` in `.env` and run `npm run dev`. This runs the full Fastify server (HTTP + WS) on one host — single-host mode. You don't need Vercel locally; `src/handlers/*` and `api/*` share the same `src/core/*` logic, so whatever works in dev will work on Vercel.
 
 ### Latency optimization
 

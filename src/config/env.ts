@@ -19,10 +19,50 @@ function optional(key: string, fallback: string): string {
   return process.env[key] || fallback;
 }
 
+// Domain resolution for hybrid deployments
+// ────────────────────────────────────────
+// Two deployment shapes are supported:
+//
+//  1. Single host (AWS Fargate, Fly, Render, etc.)
+//     Set SERVER_DOMAIN=voice.example.com. Both the HTTP API and the
+//     Twilio Media Stream WebSocket are served from the same domain.
+//
+//  2. Hybrid: Vercel for HTTP + long-running host for the WebSocket
+//     Set API_DOMAIN=api.example.com (Vercel) and
+//         WS_DOMAIN=ws.example.com  (Fargate/Fly/Render/etc).
+//     The TwiML returned by the API must point <Stream url> at WS_DOMAIN,
+//     which is what makes this split work — Vercel's serverless runtime
+//     can't host Twilio's long-lived bidirectional media stream.
+//
+// Either form is valid. If only SERVER_DOMAIN is set, API and WS both
+// resolve to it. If API_DOMAIN/WS_DOMAIN are set, they override.
+const _serverDomain = process.env.SERVER_DOMAIN || "";
+const _apiDomain = process.env.API_DOMAIN || _serverDomain;
+const _wsDomain = process.env.WS_DOMAIN || _serverDomain;
+
+if (!_apiDomain) {
+  throw new Error(
+    "Missing required env var: set API_DOMAIN (Vercel hybrid) or SERVER_DOMAIN (single host)",
+  );
+}
+if (!_wsDomain) {
+  throw new Error(
+    "Missing required env var: set WS_DOMAIN (Vercel hybrid) or SERVER_DOMAIN (single host)",
+  );
+}
+
 export const env = {
   // Server
   port: parseInt(optional("PORT", "8080"), 10),
-  serverDomain: required("SERVER_DOMAIN"),
+  // Legacy single-host domain. Still exposed for callers that haven't
+  // migrated to the API/WS split; resolves to apiDomain when unset.
+  serverDomain: _serverDomain || _apiDomain,
+  // Domain that serves HTTP routes (TwiML webhook, outbound, records,
+  // health). Hosted on Vercel in the hybrid deployment.
+  apiDomain: _apiDomain,
+  // Domain that serves the Twilio Media Stream WebSocket (/call/stream).
+  // Must be a long-running host — NOT a serverless function.
+  wsDomain: _wsDomain,
   nodeEnv: optional("NODE_ENV", "development"),
   logLevel: optional("LOG_LEVEL", "info"),
 
