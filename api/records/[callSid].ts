@@ -8,19 +8,35 @@
  * original path when routing to a [param] file).
  *
  * Auth: Bearer token (OUTBOUND_API_KEY).
+ * Rate limits: RECORDS_RATE_LIMIT_PER_MIN / PER_HOUR (audit E-1).
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
 import {
   authorizeRecords,
+  checkRecordsRateLimit,
   deleteRecord,
   getRecord,
+  type RecordResult,
 } from "../../src/core/records.js";
 import {
-  requireMethod,
   sendJson,
-  sendStatus,
+  stampRequestId,
 } from "../../src/core/httpAdapter.js";
+
+function sendResult<T>(res: ServerResponse, result: RecordResult<T>): void {
+  if (!result.ok && result.headers) {
+    for (const [k, v] of Object.entries(result.headers)) {
+      res.setHeader(k, v);
+    }
+  }
+  if (result.status === 204) {
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
+  sendJson(res, result.status, result.body);
+}
 
 /**
  * Extract the :callSid segment from a URL. Vercel may preserve the
@@ -41,33 +57,36 @@ export default async function handler(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
+  stampRequestId(req, res);
+  // Reject method first so Retry-After on 429 never reaches a PUT etc.
+  if (req.method !== "GET" && req.method !== "DELETE") {
+    res.statusCode = 405;
+    res.setHeader("Allow", "GET, DELETE");
+    res.end();
+    return;
+  }
+
   const authError = authorizeRecords(req.headers.authorization);
   if (authError) {
-    sendJson(res, authError.status, authError.body);
+    sendResult(res, authError);
+    return;
+  }
+
+  const rateLimitError = await checkRecordsRateLimit<unknown>(
+    req.headers.authorization,
+  );
+  if (rateLimitError) {
+    sendResult(res, rateLimitError);
     return;
   }
 
   const callSid = extractCallSid(req.url);
 
   if (req.method === "GET") {
-    const result = await getRecord(callSid);
-    if (result.ok) {
-      sendJson(res, result.status, result.body);
-    } else {
-      sendJson(res, result.status, result.body);
-    }
+    sendResult(res, await getRecord(callSid));
     return;
   }
 
-  if (req.method === "DELETE") {
-    const result = await deleteRecord(callSid);
-    if (result.ok && result.status === 204) {
-      sendStatus(res, 204);
-    } else {
-      sendJson(res, result.status, result.body);
-    }
-    return;
-  }
-
-  if (!requireMethod(req, res, "GET")) return;
+  // DELETE (only other allowed method after the method guard).
+  sendResult(res, await deleteRecord(callSid));
 }

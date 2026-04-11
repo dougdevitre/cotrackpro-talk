@@ -20,6 +20,8 @@ import {
   onSessionDestroy,
   sessionCount,
   allSessions,
+  isAtCapacity,
+  peakSessionCount,
 } from "../src/utils/sessions.js";
 
 // The session store is a module-level singleton, so tests must clean
@@ -177,6 +179,46 @@ describe("sessions module", () => {
       createSession("CAreuse", "MZreuse2");
       destroySession("CAreuse");
       assert.equal(count, 0);
+    });
+  });
+
+  // ── isAtCapacity / peakSessionCount (audit E-2) ─────────────────────
+  //
+  // Tests the session-cap helpers. Note: peakSessionCount is a
+  // process-lifetime high-water mark, not reset between tests — so
+  // we test "peak >= current count" rather than exact equality.
+
+  describe("capacity cap (E-2)", () => {
+    it("isAtCapacity() returns false below MAX_CONCURRENT_SESSIONS", () => {
+      // setupEnv pins MAX_CONCURRENT_SESSIONS=1000; we won't create
+      // that many.
+      assert.equal(isAtCapacity(), false);
+    });
+
+    it("peakSessionCount() is at least the current session count", () => {
+      createSession("CAcap1", "MZcap1");
+      createSession("CAcap2", "MZcap2");
+      const current = sessionCount();
+      const peak = peakSessionCount();
+      assert.ok(
+        peak >= current,
+        `peak (${peak}) should be >= current (${current})`,
+      );
+      destroySession("CAcap1");
+      destroySession("CAcap2");
+    });
+
+    it("peakSessionCount() does not decrease when sessions are destroyed", () => {
+      createSession("CApeak1", "MZpeak1");
+      createSession("CApeak2", "MZpeak2");
+      const peakWhileFull = peakSessionCount();
+      destroySession("CApeak1");
+      destroySession("CApeak2");
+      assert.equal(
+        peakSessionCount(),
+        peakWhileFull,
+        "peak should not decrease on destroy",
+      );
     });
   });
 });

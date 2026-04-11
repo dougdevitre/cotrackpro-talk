@@ -53,7 +53,16 @@ export class ElevenLabsStream {
     this.log = logger.child({ callSid: opts.callSid, service: "elevenlabs" });
   }
 
-  /** Open the WebSocket and send the beginning-of-stream (BOS) message */
+  /**
+   * Open the WebSocket and send the beginning-of-stream (BOS) message.
+   *
+   * E-5 in the audit: the WS `open` event used to have no timeout, so
+   * a slow or wedged ElevenLabs endpoint could leave `connect()`
+   * pending indefinitely. The call would hold a 2-hour session TTL
+   * burning memory with no audio ever reaching the caller. We now
+   * race the `open` event against `env.elevenLabsConnectTimeoutMs`
+   * and reject with a distinguishable TimeoutError on expiry.
+   */
   async connect(): Promise<void> {
     const model = env.elevenLabsModelId;
     const url =
@@ -66,7 +75,38 @@ export class ElevenLabsStream {
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(url);
 
+      // Timeout guard. Fires if neither `open` nor `error` has resolved
+      // the promise within elevenLabsConnectTimeoutMs.
+      let settled = false;
+      const timeoutMs = env.elevenLabsConnectTimeoutMs;
+      const timeoutTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const err = new Error(
+          `ElevenLabs WS connect timed out after ${timeoutMs}ms`,
+        );
+        err.name = "TimeoutError";
+        this.log.error(
+          { timeoutMs },
+          "elevenlabs.connect.timeout",
+        );
+        // Tear down the half-open socket so it can't linger and
+        // accidentally resolve later.
+        try {
+          this.ws?.terminate();
+        } catch {
+          /* ignore */
+        }
+        this.ws = null;
+        if (!this.isClosed) this.onError(err);
+        reject(err);
+      }, timeoutMs);
+
       this.ws.on("open", () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutTimer);
+
         this.log.info("ElevenLabs WS open — sending BOS");
         // Beginning-of-stream: configure voice settings + auth
         this.ws!.send(
@@ -104,6 +144,9 @@ export class ElevenLabsStream {
       });
 
       this.ws.on("error", (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutTimer);
         this.log.error({ err }, "ElevenLabs WS error");
         if (!this.isClosed) this.onError(err);
         reject(err);

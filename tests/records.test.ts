@@ -9,7 +9,7 @@
  */
 
 import "./helpers/setupEnv.js";
-import { describe, it } from "node:test";
+import { describe, it, beforeEach, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import {
   encodeCursor,
@@ -17,12 +17,14 @@ import {
   parseLimit,
   MAX_RECORDS_LIMIT,
   authorizeRecords,
+  checkRecordsRateLimit,
   getRecord,
   listRecords,
   listRecordsByRole,
   listRecordsByStatus,
   deleteRecord,
 } from "../src/core/records.js";
+import { _resetKvForTests } from "../src/services/kv.js";
 
 describe("encodeCursor / decodeCursor", () => {
   it("round-trips a DynamoDB lastKey", () => {
@@ -209,5 +211,109 @@ describe("deleteRecord", () => {
     const r = await deleteRecord("CA-does-not-exist");
     assert.equal(r.ok, false);
     if (!r.ok) assert.equal(r.status, 404);
+  });
+});
+
+// ── checkRecordsRateLimit (audit E-1) ─────────────────────────────────
+//
+// Closes the /records/* bill-amplification surface. Uses the same
+// KV infrastructure as checkOutboundRateLimit, so these tests focus
+// on the wiring (not the underlying fixed-window algorithm, which
+// is already exercised in tests/rateLimit.test.ts).
+
+describe("checkRecordsRateLimit", () => {
+  beforeEach(() => {
+    _resetKvForTests();
+  });
+
+  afterEach(() => {
+    mock.timers.reset();
+    _resetKvForTests();
+  });
+
+  it("allows the first request when within limits", async () => {
+    const r = await checkRecordsRateLimit<unknown>("Bearer test-key");
+    assert.equal(r, null, "should return null to signal 'allowed'");
+  });
+
+  it("allows many requests under the limit", async () => {
+    // setupEnv sets RECORDS_RATE_LIMIT_PER_MIN and _PER_HOUR to
+    // values well above 50 (see helpers/setupEnv.ts). If this ever
+    // starts failing, the default was changed below 50.
+    for (let i = 0; i < 50; i++) {
+      const r = await checkRecordsRateLimit<unknown>("Bearer test-key");
+      assert.equal(r, null);
+    }
+  });
+
+  it("keys different Authorization headers to different buckets", async () => {
+    // Burn a few on one client; confirm the other is still fresh.
+    for (let i = 0; i < 10; i++) {
+      await checkRecordsRateLimit<unknown>("Bearer alice-key");
+    }
+    const bob = await checkRecordsRateLimit<unknown>("Bearer bob-key");
+    assert.equal(bob, null, "bob should still be allowed");
+  });
+
+  it("treats missing Authorization as 'anonymous' bucket", async () => {
+    // OUTBOUND_API_KEY is unset in setupEnv, so the code path uses
+    // the literal "anonymous" key.
+    const r = await checkRecordsRateLimit<unknown>(undefined);
+    assert.equal(r, null);
+  });
+
+  it("returns a 429 RecordResult with Retry-After header when limits trip", async () => {
+    // Use an extremely low ad-hoc limit by flipping env vars for
+    // the test. Because env is frozen at import time, we instead
+    // burn through the default limit. setupEnv sets both limits
+    // high enough that doing this in a unit test is awkward, so
+    // we instead verify the shape of the result when it's a 429
+    // by exhausting a small per-hour budget. For speed we
+    // exercise the algorithm directly in tests/rateLimit.test.ts
+    // and use this test only for the records-specific wiring.
+    //
+    // The wiring check: on exhaustion, the result has
+    // `ok: false`, `status: 429`, `body.retryAfterSeconds > 0`,
+    // and `headers["Retry-After"]` set.
+    //
+    // We simulate by directly constructing what checkRateLimit
+    // returns. This test lives in the wiring file because a
+    // regression in `checkRecordsRateLimit` that stripped the
+    // headers would pass the underlying rate-limit test but
+    // break this one.
+    //
+    // Simplest possible: flood until tripped, then check shape.
+    // Uses a fresh KV and relies on the setupEnv default limits.
+    // If limits are very high, this loop may be slow — cap it.
+    // The current defaults (120/min, 2000/hr) would require 121
+    // iterations minimum, which is fast.
+    _resetKvForTests();
+    let result: Awaited<ReturnType<typeof checkRecordsRateLimit<unknown>>>;
+    let tripped = false;
+    // Burn enough to cross the minute limit with a safety factor.
+    for (let i = 0; i < 200; i++) {
+      result = await checkRecordsRateLimit<unknown>("Bearer overflow-key");
+      if (result !== null) {
+        tripped = true;
+        break;
+      }
+    }
+
+    assert.equal(tripped, true, "rate limit should have tripped");
+    if (tripped && result!) {
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.equal(result.status, 429);
+        assert.ok(
+          typeof result.body.retryAfterSeconds === "number" &&
+            result.body.retryAfterSeconds > 0,
+          "retryAfterSeconds must be a positive number",
+        );
+        assert.ok(
+          result.headers?.["Retry-After"],
+          "Retry-After header must be set",
+        );
+      }
+    }
   });
 });

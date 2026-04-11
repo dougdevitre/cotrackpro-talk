@@ -24,7 +24,11 @@ import {
   last24Hours,
   type RollupResult,
 } from "../../src/core/costRollup.js";
-import { requireMethod, sendJson } from "../../src/core/httpAdapter.js";
+import {
+  requireMethod,
+  sendJson,
+  stampRequestId,
+} from "../../src/core/httpAdapter.js";
 import { bearerMatches } from "../../src/core/auth.js";
 import { env } from "../../src/config/env.js";
 import { logger } from "../../src/utils/logger.js";
@@ -36,19 +40,40 @@ const log = logger.child({ cron: "cost-rollup" });
  * false + writes a response on failure (so the caller can early-
  * return).
  *
- * The check is skipped entirely when CRON_SECRET is unset. That's a
- * deliberate escape hatch for local development: you can hit the
- * endpoint with `curl http://localhost:3000/api/cron/cost-rollup`
- * to test the rollup logic without faking a Bearer token. In
- * production CRON_SECRET must be set.
+ * Behavior when CRON_SECRET is unset:
+ *
+ *   - NODE_ENV === "production" → **fail-closed 500**. Unsetting the
+ *     secret in prod is a misconfiguration that would turn the
+ *     endpoint into an unauthenticated DynamoDB-scan amplifier for
+ *     anyone on the internet. We refuse to run rather than warn.
+ *     (Audit E-3 in docs/CODE_REVIEW-vercel-hosting-optimization.md.)
+ *
+ *   - Any other NODE_ENV → permit unauthenticated calls with a
+ *     warning log. Lets local developers hit
+ *     `curl http://localhost:3000/api/cron/cost-rollup`
+ *     without faking a Bearer token.
  */
 function authorizeCron(
   req: IncomingMessage,
   res: ServerResponse,
 ): boolean {
   if (!env.cronSecret) {
+    if (env.nodeEnv === "production") {
+      // Fail closed. This is a misconfiguration, not a legitimate
+      // state, so we return 500 rather than 401 to surface it as
+      // an incident rather than a caller error.
+      log.error(
+        "CRON_SECRET is unset in production — refusing to run the cron handler. Set the env var and redeploy.",
+      );
+      sendJson(res, 500, {
+        error: "Server misconfigured",
+        details: "CRON_SECRET is required in production",
+      });
+      return false;
+    }
     log.warn(
-      "CRON_SECRET is unset — cron handler is unauthenticated. Set CRON_SECRET in production.",
+      { nodeEnv: env.nodeEnv },
+      "CRON_SECRET is unset — cron handler is unauthenticated (non-prod escape hatch).",
     );
     return true;
   }
@@ -63,6 +88,7 @@ export default async function handler(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
+  stampRequestId(req, res);
   // Vercel Cron issues GET requests. We accept GET only so a stray
   // POST can't trigger a rollup.
   if (!requireMethod(req, res, "GET")) return;

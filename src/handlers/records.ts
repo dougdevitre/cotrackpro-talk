@@ -16,6 +16,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   authorizeRecords,
+  checkRecordsRateLimit,
   deleteRecord,
   getRecord,
   listRecords,
@@ -25,17 +26,34 @@ import {
 } from "../core/records.js";
 
 function send<T>(reply: FastifyReply, result: RecordResult<T>): FastifyReply {
+  // 429 responses carry headers (Retry-After) that must be set before
+  // .send() is called. The same applies to any future error variant
+  // that wants to advertise metadata via HTTP headers.
+  if (!result.ok && result.headers) {
+    for (const [k, v] of Object.entries(result.headers)) {
+      reply.header(k, v);
+    }
+  }
   if (result.status === 204) return reply.status(204).send();
   return reply.status(result.status).send(result.body);
 }
 
 export function registerRecordRoutes(app: FastifyInstance): void {
-  // ── Auth hook for all /records routes ──────────────────────────────────
+  // ── Auth + rate-limit hook for all /records routes ────────────────
+  // Order matters: auth rejects unauthenticated requests BEFORE they
+  // touch the KV rate limiter, so a flood of unauth'd garbage can't
+  // chew through the authenticated caller's rate budget.
   app.addHook("preHandler", async (request: FastifyRequest, reply: FastifyReply) => {
     if (!request.url.startsWith("/records")) return;
     const authError = authorizeRecords(request.headers.authorization);
     if (authError) {
       return reply.status(authError.status).send(authError.body);
+    }
+    const rateLimitError = await checkRecordsRateLimit<unknown>(
+      request.headers.authorization,
+    );
+    if (rateLimitError) {
+      return send(reply, rateLimitError);
     }
   });
 

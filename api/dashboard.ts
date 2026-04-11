@@ -22,7 +22,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
-import { requireMethod } from "../src/core/httpAdapter.js";
+import { requireMethod, stampRequestId } from "../src/core/httpAdapter.js";
 
 const HTML = `<!doctype html>
 <html lang="en">
@@ -350,6 +350,7 @@ export default async function handler(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
+  stampRequestId(req, res);
   if (!requireMethod(req, res, "GET")) return;
 
   res.statusCode = 200;

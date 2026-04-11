@@ -120,7 +120,7 @@ export const env = {
   kvToken: process.env.KV_TOKEN || "",
 
   // ── Rate limits ──────────────────────────────────────────────────────
-  // Sliding-window rate limit on POST /call/outbound. Protects against
+  // Fixed-window rate limit on POST /call/outbound. Protects against
   // runaway bills if OUTBOUND_API_KEY is ever leaked.
   outboundRateLimitPerMin: parseInt(
     optional("OUTBOUND_RATE_LIMIT_PER_MIN", "30"),
@@ -128,6 +128,49 @@ export const env = {
   ),
   outboundRateLimitPerHour: parseInt(
     optional("OUTBOUND_RATE_LIMIT_PER_HOUR", "500"),
+    10,
+  ),
+  // Fixed-window rate limit on /records/*. Prevents a leaked API key
+  // from amplifying into unbounded DynamoDB scan cost (audit E-1).
+  // Defaults are looser than /call/outbound because dashboard
+  // pagination is chattier but less expensive per request.
+  recordsRateLimitPerMin: parseInt(
+    optional("RECORDS_RATE_LIMIT_PER_MIN", "120"),
+    10,
+  ),
+  recordsRateLimitPerHour: parseInt(
+    optional("RECORDS_RATE_LIMIT_PER_HOUR", "2000"),
+    10,
+  ),
+
+  // ── Concurrent-call cap (audit E-2) ─────────────────────────────────
+  // Hard ceiling on simultaneous WS sessions on a single WS host. New
+  // sessions beyond this are rejected BEFORE any downstream STT / Claude
+  // / TTS resource is allocated, so an attacker that opens 100k WS
+  // connections can't OOM the host. The Fastify WS route returns a
+  // concise close frame and Twilio retries or hangs up.
+  maxConcurrentSessions: parseInt(
+    optional("MAX_CONCURRENT_SESSIONS", "200"),
+    10,
+  ),
+
+  // ── DynamoDB retry budget (audit E-4) ───────────────────────────────
+  // Max retries the AWS SDK attempts on transient errors before a
+  // write fails permanently. Increase if you see throttling under
+  // load; decrease if retry latency during DynamoDB outages is
+  // hurting call quality more than missing records would.
+  dynamoMaxRetries: parseInt(optional("DYNAMO_MAX_RETRIES", "3"), 10),
+
+  // ── External-service timeouts (audit E-5) ───────────────────────────
+  // Explicit timeouts on the audio hot path so a slow upstream doesn't
+  // deadlock a call until the 2-hour max-duration reaper kicks in.
+  // Values in milliseconds.
+  anthropicStreamTimeoutMs: parseInt(
+    optional("ANTHROPIC_STREAM_TIMEOUT_MS", "45000"),
+    10,
+  ),
+  elevenLabsConnectTimeoutMs: parseInt(
+    optional("ELEVENLABS_CONNECT_TIMEOUT_MS", "10000"),
     10,
   ),
 

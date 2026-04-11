@@ -10,6 +10,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
+import { resolveRequestId } from "./requestId.js";
 
 /** Read the raw request body as a UTF-8 string. */
 export function readRawBody(req: IncomingMessage): Promise<string> {
@@ -113,4 +114,23 @@ export function requireMethod(
   res.setHeader("Allow", method);
   res.end();
   return false;
+}
+
+/**
+ * Stamp a request ID on the response and return it so the handler
+ * can include it in child-logger calls. Honors an inbound
+ * `x-request-id` header (length + charset validated by
+ * resolveRequestId) or generates a new 16-hex-char ID. Audit P-5.
+ *
+ * Shares the generation logic with the Fastify preHandler via
+ * `src/core/requestId.ts` so there's one definition of the ID
+ * format across both tiers.
+ */
+export function stampRequestId(
+  req: IncomingMessage,
+  res: ServerResponse,
+): string {
+  const id = resolveRequestId(req.headers["x-request-id"]);
+  res.setHeader("x-request-id", id);
+  return id;
 }

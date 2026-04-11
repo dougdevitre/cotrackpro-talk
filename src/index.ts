@@ -14,11 +14,12 @@ import fastifyWebSocket from "@fastify/websocket";
 import fastifyFormBody from "@fastify/formbody";
 import { env } from "./config/env.js";
 import { logger } from "./utils/logger.js";
-import { sessionCount } from "./utils/sessions.js";
+import { peakSessionCount, sessionCount } from "./utils/sessions.js";
 import { registerTwimlRoutes } from "./handlers/twiml.js";
 import { registerOutboundRoutes } from "./handlers/outbound.js";
 import { registerRecordRoutes } from "./handlers/records.js";
 import { handleCallStream } from "./handlers/callHandler.js";
+import { resolveRequestId } from "./core/requestId.js";
 
 async function main() {
   const app = Fastify({
@@ -29,16 +30,31 @@ async function main() {
   await app.register(fastifyFormBody); // Parse Twilio's application/x-www-form-urlencoded
   await app.register(fastifyWebSocket);
 
+  // ── Request ID stamp (audit P-5) ──────────────────────────────────────
+  // Every HTTP request gets a short random ID exposed via the
+  // `x-request-id` response header. If the caller provides one we
+  // honor it (subject to length / charset validation in
+  // resolveRequestId). The ID is attached to the request context so
+  // handlers can forward it into child loggers.
+  app.addHook("onRequest", async (request, reply) => {
+    const id = resolveRequestId(request.headers["x-request-id"]);
+    (request as typeof request & { requestId: string }).requestId = id;
+    reply.header("x-request-id", id);
+  });
+
   // ── HTTP Routes ───────────────────────────────────────────────────────
   registerTwimlRoutes(app);
   registerOutboundRoutes(app);
   registerRecordRoutes(app);
 
-  // Health check
+  // Health check — includes peak session count so operators can see
+  // how close we've been to the concurrent-session cap (audit E-2).
   app.get("/health", async (_req, reply) => {
     reply.send({
       status: "ok",
       activeCalls: sessionCount(),
+      peakActiveCalls: peakSessionCount(),
+      maxConcurrentSessions: env.maxConcurrentSessions,
       uptime: process.uptime(),
     });
   });

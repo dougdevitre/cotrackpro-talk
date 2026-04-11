@@ -1,0 +1,62 @@
+# Dependabot configuration
+#
+# Audit E-7 — automated weekly updates for npm and GitHub Actions so
+# we don't drift silently between bumps. Security updates arrive as
+# their own out-of-band PRs (Dependabot opens those regardless of
+# this schedule).
+#
+# Strategy:
+#
+#   - npm: weekly, grouped by type. Majors ship on their own because
+#     they usually need manual review; minor + patch group into one
+#     PR so the review budget isn't burned on churn.
+#
+#   - github-actions: weekly. The test.yml workflow pins
+#     actions/checkout@v4 and actions/setup-node@v4 — Dependabot
+#     bumps them when new majors drop.
+#
+# Reviewers/assignees are not set here because the repo has a single
+# active maintainer; adjust if the team grows.
+
+version: 2
+updates:
+  # ── Application dependencies (npm) ────────────────────────────────
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 5
+    # Group non-major bumps to reduce PR churn. Majors always get
+    # their own PR so the changelog review is focused.
+    groups:
+      minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+    # Cap the PR title so reviewers can scan the PR list.
+    commit-message:
+      prefix: "deps"
+      prefix-development: "deps(dev)"
+      include: scope
+    labels:
+      - dependencies
+
+  # ── GitHub Actions workflows ──────────────────────────────────────
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"
+      include: scope
+    labels:
+      - dependencies
+      - ci

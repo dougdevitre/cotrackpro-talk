@@ -462,14 +462,25 @@ export async function streamResponse(
 ): Promise<void> {
   const log = logger.child({ callSid: session.callSid });
 
+  // E-5: Explicit timeout on the Claude streaming call so a slow or
+  // stuck upstream doesn't deadlock the call until the 2-hour
+  // max-duration reaper runs. The signal aborts the HTTP request,
+  // the SDK surfaces that as an error, and we propagate it through
+  // onError so the call handler can decide whether to hang up or
+  // play a fallback message.
+  const abort = AbortSignal.timeout(env.anthropicStreamTimeoutMs);
+
   try {
-    const stream = client.messages.stream({
-      model: env.anthropicModel,
-      max_tokens: 512, // Keep voice responses concise
-      system: buildCacheableSystem(session.role),
-      messages: buildMessages(session),
-      tools: COTRACKPRO_TOOLS,
-    });
+    const stream = client.messages.stream(
+      {
+        model: env.anthropicModel,
+        max_tokens: 512, // Keep voice responses concise
+        system: buildCacheableSystem(session.role),
+        messages: buildMessages(session),
+        tools: COTRACKPRO_TOOLS,
+      },
+      { signal: abort },
+    );
 
     let fullText = "";
 
@@ -510,7 +521,19 @@ export async function streamResponse(
 
     callbacks.onComplete(fullText);
   } catch (err) {
-    log.error({ err }, "Anthropic stream error");
+    // Distinguish timeout from generic errors so the caller can
+    // log / alert / degrade differently on each.
+    const isTimeout =
+      abort.aborted ||
+      (err instanceof Error && err.name === "AbortError");
+    log.error(
+      {
+        err,
+        timeout: isTimeout,
+        timeoutMs: env.anthropicStreamTimeoutMs,
+      },
+      isTimeout ? "anthropic.stream.timeout" : "anthropic.stream.error",
+    );
     callbacks.onError(err instanceof Error ? err : new Error(String(err)));
   }
 }
@@ -542,14 +565,20 @@ export async function sendToolResult(
     timestamp: Date.now(),
   });
 
+  // E-5: Same timeout on the tool-result streaming path.
+  const abort = AbortSignal.timeout(env.anthropicStreamTimeoutMs);
+
   try {
-    const stream = client.messages.stream({
-      model: env.anthropicModel,
-      max_tokens: 512,
-      system: buildCacheableSystem(session.role),
-      messages: buildMessages(session),
-      tools: COTRACKPRO_TOOLS,
-    });
+    const stream = client.messages.stream(
+      {
+        model: env.anthropicModel,
+        max_tokens: 512,
+        system: buildCacheableSystem(session.role),
+        messages: buildMessages(session),
+        tools: COTRACKPRO_TOOLS,
+      },
+      { signal: abort },
+    );
 
     let fullText = "";
 
@@ -564,7 +593,19 @@ export async function sendToolResult(
 
     callbacks.onComplete(fullText);
   } catch (err) {
-    log.error({ err }, "Anthropic sendToolResult stream error");
+    const isTimeout =
+      abort.aborted ||
+      (err instanceof Error && err.name === "AbortError");
+    log.error(
+      {
+        err,
+        timeout: isTimeout,
+        timeoutMs: env.anthropicStreamTimeoutMs,
+      },
+      isTimeout
+        ? "anthropic.sendToolResult.timeout"
+        : "anthropic.sendToolResult.error",
+    );
     callbacks.onError(err instanceof Error ? err : new Error(String(err)));
   }
 }
