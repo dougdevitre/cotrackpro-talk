@@ -10,6 +10,7 @@ import twilio from "twilio";
 import { env } from "../config/env.js";
 import { logger } from "../utils/logger.js";
 import { buildOutboundTwiml } from "./twiml.js";
+import { checkRateLimit, hashClientKey } from "./rateLimit.js";
 
 const log = logger.child({ core: "outbound" });
 
@@ -36,8 +37,14 @@ export type OutboundResult =
     }
   | {
       ok: false;
-      status: 400 | 401 | 500;
-      body: { error: string; details?: string };
+      status: 400 | 401 | 429 | 500;
+      body: {
+        error: string;
+        details?: string;
+        retryAfterSeconds?: number;
+      };
+      /** Optional headers the adapter should set (e.g. Retry-After). */
+      headers?: Record<string, string>;
     };
 
 /**
@@ -53,6 +60,55 @@ export function authorizeOutbound(
     return { ok: false, status: 401, body: { error: "Unauthorized" } };
   }
   return null;
+}
+
+/**
+ * Rate-limit check keyed on the caller's API key (hashed). When the
+ * Bearer token isn't set we key on a literal "anonymous" bucket, so
+ * unauth'd local dev still gets a single shared budget — useful when
+ * testing and not harmful in prod (prod always has the Bearer token).
+ */
+export async function checkOutboundRateLimit(
+  authHeader: string | undefined,
+): Promise<OutboundResult | null> {
+  // Caller identity for rate-limit bucketing. Hash so the KV key
+  // doesn't contain the raw secret.
+  const rawKey = env.outboundApiKey
+    ? (authHeader?.replace(/^Bearer\s+/i, "") ?? "anonymous")
+    : "anonymous";
+  const clientKey = hashClientKey(rawKey);
+
+  const result = await checkRateLimit(clientKey, "outbound", {
+    perMinute: env.outboundRateLimitPerMin,
+    perHour: env.outboundRateLimitPerHour,
+  });
+
+  if (result.allowed) return null;
+
+  const retryAfterSeconds = result.resetAt
+    ? Math.max(1, Math.ceil((result.resetAt - Date.now()) / 1000))
+    : 60;
+
+  log.warn(
+    {
+      clientKey,
+      limitedBy: result.limitedBy,
+      counts: result.counts,
+      retryAfterSeconds,
+    },
+    "Outbound call rate-limited",
+  );
+
+  return {
+    ok: false,
+    status: 429,
+    body: {
+      error: "Too many requests",
+      details: `Rate limit exceeded (${result.limitedBy} window)`,
+      retryAfterSeconds,
+    },
+    headers: { "Retry-After": String(retryAfterSeconds) },
+  };
 }
 
 /**
