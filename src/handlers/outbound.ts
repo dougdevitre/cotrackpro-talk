@@ -8,7 +8,7 @@
  *   body: { to: "+15551234567", role?: "parent" }
  */
 
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import {
   authorizeOutbound,
   checkOutboundRateLimit,
@@ -16,7 +16,6 @@ import {
   type OutboundRequest,
   type OutboundResult,
 } from "../core/outbound.js";
-import type { FastifyReply } from "fastify";
 
 function sendResult(reply: FastifyReply, result: OutboundResult): FastifyReply {
   if (!result.ok && result.headers) {

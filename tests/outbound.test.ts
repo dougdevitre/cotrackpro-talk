@@ -14,6 +14,8 @@ import {
   authorizeOutbound,
   checkOutboundRateLimit,
   initiateOutboundCall,
+  type OutboundResult,
+  type OutboundRateLimited,
 } from "../src/core/outbound.js";
 import {
   _resetKvForTests,
@@ -233,5 +235,120 @@ describe("checkOutboundRateLimit", () => {
     // the literal "anonymous" key. Just confirm it doesn't throw.
     const r = await checkOutboundRateLimit(undefined);
     assert.equal(r, null);
+  });
+});
+
+// ── L-1: Discriminated union narrowing contract ─────────────────────
+//
+// These tests pin the TYPE-level contract of the new OutboundResult
+// discriminated union. They're mostly compile-time checks — if the
+// type narrows correctly, the file compiles; if a refactor regresses
+// the discrimination, `npm run typecheck` fails before the test
+// runner even starts. The assertions at runtime are cheap sanity
+// checks on shape.
+
+describe("OutboundResult — discriminated union narrowing (L-1)", () => {
+  it("status 429 narrows to require retryAfterSeconds without optional chaining", () => {
+    // Construct a 429 result directly so the narrowing is obvious.
+    // A previous version of this type had retryAfterSeconds as
+    // optional, which meant every caller had to `?? 60` defensively.
+    const rateLimited: OutboundRateLimited = {
+      ok: false,
+      status: 429,
+      body: {
+        error: "Too many requests",
+        retryAfterSeconds: 30,
+      },
+      headers: { "Retry-After": "30" },
+    };
+
+    // Caller pattern: check status, then access retryAfterSeconds
+    // with NO optional chaining. If retryAfterSeconds were still
+    // optional, TypeScript would require `?.` and this assignment
+    // to `number` would fail typecheck.
+    const retry: number = rateLimited.body.retryAfterSeconds;
+    assert.equal(retry, 30);
+  });
+
+  it("status 401 does not permit details or retryAfterSeconds (compile-time only)", () => {
+    // Status 401 body only has `error`. The expect-error directive
+    // below marks the `details` property as an intentional type
+    // error; if a future refactor widens the 401 body to accept
+    // extra fields, this test fails at compile time.
+    const bad: OutboundResult = {
+      ok: false,
+      status: 401,
+      body: {
+        error: "Unauthorized",
+        // @ts-expect-error — `details` is not allowed on the 401 body
+        details: "extra",
+      },
+    };
+    // Runtime use of the value so the test body isn't empty.
+    assert.equal(bad.status, 401);
+  });
+
+  it("status 400 does permit optional details (compile-time only)", () => {
+    // 400 is used for both "missing 'to'" (no details) and phone
+    // validation (with details). Both shapes must be valid.
+    const withoutDetails: OutboundResult = {
+      ok: false,
+      status: 400,
+      body: { error: "Missing 'to'" },
+    };
+    const withDetails: OutboundResult = {
+      ok: false,
+      status: 400,
+      body: { error: "Invalid destination", details: "not E.164" },
+    };
+    assert.equal(withoutDetails.status, 400);
+    assert.equal(withDetails.status, 400);
+  });
+
+  it("status 200 does not permit error / details (compile-time only)", () => {
+    // Success body is strict: success/callSid/to/role. Attempting to
+    // smuggle an `error` field in is a type error.
+    const bad: OutboundResult = {
+      ok: true,
+      status: 200,
+      body: {
+        success: true,
+        callSid: "CA",
+        to: "+1",
+        role: "parent",
+        // @ts-expect-error — `error` is not allowed on the 200 body
+        error: "nope",
+      },
+    };
+    assert.equal(bad.status, 200);
+  });
+
+  it("can exhaustively switch on status thanks to the union", () => {
+    // This is the real payoff: a caller that switches on status gets
+    // narrowed types in each branch. If a new variant is added to
+    // OutboundResult, TypeScript will flag the switch as non-exhaustive.
+    function summarize(r: OutboundResult): string {
+      switch (r.status) {
+        case 200:
+          return `ok ${r.body.callSid}`;
+        case 400:
+          return `bad request: ${r.body.error}`;
+        case 401:
+          return `unauthorized`;
+        case 429:
+          // No optional chaining required:
+          return `rate limited, retry in ${r.body.retryAfterSeconds}s`;
+        case 500:
+          return `server error: ${r.body.error}`;
+      }
+    }
+
+    const r: OutboundResult = {
+      ok: false,
+      status: 429,
+      body: { error: "Too many", retryAfterSeconds: 45 },
+      headers: { "Retry-After": "45" },
+    };
+    assert.equal(summarize(r), "rate limited, retry in 45s");
   });
 });

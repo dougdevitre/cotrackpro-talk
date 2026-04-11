@@ -32,30 +32,104 @@ export type OutboundRequest = {
   role?: string;
 };
 
+/**
+ * Discriminated union for outbound-call results.
+ *
+ * Previously this was a single error variant with
+ * `body: { error; details?; retryAfterSeconds? }`, which was too
+ * permissive: every error status permitted every optional field,
+ * even though `retryAfterSeconds` only makes sense on 429 and
+ * `details` isn't used on 401. L-1 in the code review called this
+ * out as "missed opportunity for a discriminated union."
+ *
+ * The variants below narrow each status to exactly the fields it
+ * actually populates:
+ *
+ *   - `OutboundSuccess`     — 200: happy path, `headers` optional
+ *                             (X-Idempotent-Replay when applicable).
+ *   - `OutboundBadRequest`  — 400: validation failures (missing
+ *                             `to`, non-E.164, disallowed country,
+ *                             malformed Idempotency-Key). `details`
+ *                             is optional because the "missing 'to'"
+ *                             path doesn't set one.
+ *   - `OutboundUnauthorized`— 401: Bearer token missing or wrong.
+ *                             Just `{ error }`.
+ *   - `OutboundRateLimited` — 429: retry-after is REQUIRED so that
+ *                             callers who check `status === 429` can
+ *                             trust the field is present without
+ *                             optional chaining.
+ *   - `OutboundServerError` — 500: transient Twilio REST failure.
+ *
+ * `IdempotencyKeyError` from `core/idempotency.ts` has a
+ * `{ ok: false; status: 400; body: { error; details } }` shape that
+ * is a width-subtype of `OutboundBadRequest` (required `details` is
+ * assignable to optional `details`), so the `return keyParse;`
+ * short-circuit in `initiateOutboundCall` still typechecks.
+ */
+
+export type OutboundSuccess = {
+  ok: true;
+  status: 200;
+  body: {
+    success: true;
+    callSid: string;
+    to: string;
+    role: string;
+  };
+  /** Optional headers the adapter should set (e.g. X-Idempotent-Replay). */
+  headers?: Record<string, string>;
+};
+
+export type OutboundBadRequest = {
+  ok: false;
+  status: 400;
+  body: {
+    error: string;
+    details?: string;
+  };
+  headers?: Record<string, string>;
+};
+
+export type OutboundUnauthorized = {
+  ok: false;
+  status: 401;
+  body: {
+    error: string;
+  };
+  headers?: Record<string, string>;
+};
+
+export type OutboundRateLimited = {
+  ok: false;
+  status: 429;
+  body: {
+    error: string;
+    details?: string;
+    /** Seconds until the client may retry. REQUIRED — this is the
+     *  discrimination payoff: callers who check status === 429 can
+     *  trust the field without optional chaining. */
+    retryAfterSeconds: number;
+  };
+  /** Adapter MUST set Retry-After from this result. */
+  headers: Record<string, string>;
+};
+
+export type OutboundServerError = {
+  ok: false;
+  status: 500;
+  body: {
+    error: string;
+    details?: string;
+  };
+  headers?: Record<string, string>;
+};
+
 export type OutboundResult =
-  | {
-      ok: true;
-      status: 200;
-      body: {
-        success: true;
-        callSid: string;
-        to: string;
-        role: string;
-      };
-      /** Optional headers the adapter should set. */
-      headers?: Record<string, string>;
-    }
-  | {
-      ok: false;
-      status: 400 | 401 | 429 | 500;
-      body: {
-        error: string;
-        details?: string;
-        retryAfterSeconds?: number;
-      };
-      /** Optional headers the adapter should set (e.g. Retry-After). */
-      headers?: Record<string, string>;
-    };
+  | OutboundSuccess
+  | OutboundBadRequest
+  | OutboundUnauthorized
+  | OutboundRateLimited
+  | OutboundServerError;
 
 /**
  * Authorize an outbound request using the Bearer token in the

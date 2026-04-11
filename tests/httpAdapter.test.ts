@@ -31,29 +31,26 @@ function mockRequest(opts: {
   body?: string;
   contentType?: string;
 }): IncomingMessage {
-  const stream = Readable.from(opts.body ?? "") as unknown as IncomingMessage;
-  // Readable.from emits the string as a single chunk already; the
-  // httpAdapter reads it as Buffers. We need to make sure the emitted
-  // chunks are Buffers not strings.
-  const stream2 = new Readable({
+  // Readable.from(string) emits the string as a single string chunk,
+  // but the httpAdapter reads chunks as Buffers. Hand-roll a Readable
+  // so we can guarantee the emitted chunks are UTF-8 Buffers.
+  const stream = new Readable({
     read() {
       this.push(opts.body ? Buffer.from(opts.body, "utf8") : null);
       this.push(null);
     },
   }) as unknown as IncomingMessage;
 
-  (stream2 as unknown as {
+  (stream as unknown as {
     url?: string;
     method?: string;
     headers: Record<string, string>;
   }).url = opts.url;
-  (stream2 as unknown as { method?: string }).method = opts.method;
-  (stream2 as unknown as { headers: Record<string, string> }).headers = {
+  (stream as unknown as { method?: string }).method = opts.method;
+  (stream as unknown as { headers: Record<string, string> }).headers = {
     ...(opts.contentType ? { "content-type": opts.contentType } : {}),
   };
-  // Silence the unused-var warning from stream.
-  void stream;
-  return stream2;
+  return stream;
 }
 
 /**
