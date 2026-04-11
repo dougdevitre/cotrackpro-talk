@@ -15,6 +15,7 @@ import {
   encodeCursor,
   decodeCursor,
   parseLimit,
+  MAX_RECORDS_LIMIT,
   authorizeRecords,
   getRecord,
   listRecords,
@@ -82,6 +83,22 @@ describe("parseLimit", () => {
     // over-engineer. A request with '?limit=50abc' gets limit=50.
     assert.equal(parseLimit("50abc", 25), 50);
   });
+
+  it("caps positive integers at MAX_RECORDS_LIMIT (H-1)", () => {
+    // Previously '?limit=10000000' would trigger a massive
+    // DynamoDB scan. parseLimit now clamps at 100.
+    assert.equal(parseLimit("10000", 25), MAX_RECORDS_LIMIT);
+    assert.equal(parseLimit("101", 25), MAX_RECORDS_LIMIT);
+    assert.equal(parseLimit("100", 25), 100);
+    assert.equal(parseLimit("99", 25), 99);
+  });
+
+  it("also caps the fallback if it's somehow > MAX_RECORDS_LIMIT", () => {
+    // Defensive: a caller passing fallback=9999 should still be
+    // clamped. Prevents future regressions.
+    assert.equal(parseLimit(undefined, 9999), MAX_RECORDS_LIMIT);
+    assert.equal(parseLimit("abc", 9999), MAX_RECORDS_LIMIT);
+  });
 });
 
 describe("authorizeRecords", () => {
@@ -138,7 +155,18 @@ describe("listRecordsByRole", () => {
     if (!r.ok) assert.equal(r.status, 400);
   });
 
-  it("accepts date-range query params", async () => {
+  it("returns 400 on an unknown role (H-2)", async () => {
+    // Previously this was silently cast via `as CoTrackProRole` and
+    // returned an empty list. Now it explicitly 400s.
+    const r = await listRecordsByRole("administrator", {});
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.equal(r.status, 400);
+      assert.match(r.body.error, /Unknown role/);
+    }
+  });
+
+  it("accepts date-range query params for a valid role", async () => {
     const r = await listRecordsByRole("parent", {
       startDate: "2026-01-01T00:00:00Z",
       endDate: "2026-04-11T00:00:00Z",
@@ -153,6 +181,20 @@ describe("listRecordsByStatus", () => {
     const r = await listRecordsByStatus(undefined, {});
     assert.equal(r.ok, false);
     if (!r.ok) assert.equal(r.status, 400);
+  });
+
+  it("returns 400 on an unknown status (H-2)", async () => {
+    const r = await listRecordsByStatus("pending", {});
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.equal(r.status, 400);
+      assert.match(r.body.error, /Unknown status/);
+    }
+  });
+
+  it("accepts a valid status", async () => {
+    const r = await listRecordsByStatus("completed", {});
+    assert.equal(r.ok, true);
   });
 });
 

@@ -11,6 +11,9 @@ import { env } from "../config/env.js";
 import { logger } from "../utils/logger.js";
 import { buildOutboundTwiml } from "./twiml.js";
 import { checkRateLimit, hashClientKey } from "./rateLimit.js";
+import { bearerMatches } from "./auth.js";
+import { validateDialable } from "./phoneValidation.js";
+import { normalizeRole } from "./enumValidation.js";
 
 const log = logger.child({ core: "outbound" });
 
@@ -51,12 +54,16 @@ export type OutboundResult =
  * Authorize an outbound request using the Bearer token in the
  * Authorization header. Returns null on success, or an OutboundResult
  * error to return to the caller.
+ *
+ * Comparison is timing-safe via `bearerMatches` to avoid leaking the
+ * token via a character-by-character side channel (see C-2 in
+ * docs/CODE_REVIEW-vercel-hosting-optimization.md).
  */
 export function authorizeOutbound(
   authHeader: string | undefined,
 ): OutboundResult | null {
   if (!env.outboundApiKey) return null; // auth disabled
-  if (!authHeader || authHeader !== `Bearer ${env.outboundApiKey}`) {
+  if (!bearerMatches(authHeader, env.outboundApiKey)) {
     return { ok: false, status: 401, body: { error: "Unauthorized" } };
   }
   return null;
@@ -127,8 +134,31 @@ export async function initiateOutboundCall(
     };
   }
 
+  // C-1: validate the phone number format and country code BEFORE
+  // handing it to Twilio. A leaked Bearer token could otherwise dial
+  // premium-rate international numbers and run up a bill before the
+  // per-hour rate limit trips. See src/core/phoneValidation.ts.
+  const phoneCheck = validateDialable(body.to);
+  if (!phoneCheck.ok) {
+    log.warn(
+      { to: body.to, reason: phoneCheck.reason },
+      "Outbound call rejected — phone number failed validation",
+    );
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        error: "Invalid destination phone number",
+        details: phoneCheck.detail,
+      },
+    };
+  }
+
+  // Validate role is a known CoTrackPro persona (H-2/H-3 in the code
+  // review). An unknown role would propagate into getVoiceId() and
+  // may fall back or crash — normalizeRole logs and returns "parent".
+  const role = normalizeRole(body.role);
   const to = body.to;
-  const role = body.role ?? "parent";
   const twimlStr = buildOutboundTwiml({ role });
 
   try {

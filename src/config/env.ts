@@ -131,6 +131,16 @@ export const env = {
     10,
   ),
 
+  // ── Phone number allow-list (C-1 in the code review) ────────────────
+  // Comma-separated ISO-3166 country codes the /call/outbound endpoint
+  // is allowed to dial. Defaults to "US,CA" because that matches the
+  // operational target today. Set to "*" to disable the check entirely
+  // (not recommended — removes bill-fraud protection).
+  outboundAllowedCountryCodes: optional(
+    "OUTBOUND_ALLOWED_COUNTRY_CODES",
+    "US,CA",
+  ),
+
   // ── Vercel Cron ──────────────────────────────────────────────────────
   // Shared secret Vercel Cron sends as Bearer token. Required in prod;
   // leave unset locally to skip auth when testing the cron handler.

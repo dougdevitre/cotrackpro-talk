@@ -8,7 +8,7 @@
 
 import { env } from "../config/env.js";
 import { logger } from "../utils/logger.js";
-import type { CoTrackProRole, CallStatus, CallRecord } from "../types/index.js";
+import type { CallRecord } from "../types/index.js";
 import {
   getCallRecord,
   listRecentCalls,
@@ -16,6 +16,8 @@ import {
   listCallsByStatus,
   deleteCallRecord,
 } from "../services/dynamo.js";
+import { bearerMatches } from "./auth.js";
+import { isValidRole, isValidStatus } from "./enumValidation.js";
 
 const log = logger.child({ core: "records" });
 
@@ -28,12 +30,17 @@ export type ListResult = {
   cursor: string | null;
 };
 
-/** Bearer-token auth check shared by all records endpoints. */
+/**
+ * Bearer-token auth check shared by all records endpoints.
+ *
+ * Uses `bearerMatches` for a timing-safe comparison — see C-2 in
+ * docs/CODE_REVIEW-vercel-hosting-optimization.md.
+ */
 export function authorizeRecords(
   authHeader: string | undefined,
 ): { ok: false; status: 401; body: { error: string } } | null {
   if (!env.outboundApiKey) return null;
-  if (!authHeader || authHeader !== `Bearer ${env.outboundApiKey}`) {
+  if (!bearerMatches(authHeader, env.outboundApiKey)) {
     return { ok: false, status: 401, body: { error: "Unauthorized" } };
   }
   return null;
@@ -64,13 +71,28 @@ export function decodeCursor(
 }
 
 /**
- * Parse a numeric limit query param with a positive-integer guard.
- * Returns `fallback` for missing, non-numeric, or non-positive input.
+ * Hard cap on any /records list query, regardless of the caller's
+ * requested limit. Protects against `?limit=10000000` DoS
+ * amplification — a huge Scan on DynamoDB would time out the
+ * serverless function and cost us real money. 100 is still more than
+ * enough for any dashboard page.
+ *
+ * Flagged as H-1 in docs/CODE_REVIEW-vercel-hosting-optimization.md.
+ */
+export const MAX_RECORDS_LIMIT = 100;
+
+/**
+ * Parse a numeric limit query param with a positive-integer guard
+ * and a hard upper cap. Returns `fallback` for missing, non-numeric,
+ * or non-positive input, and clamps to MAX_RECORDS_LIMIT otherwise.
  */
 export function parseLimit(raw: string | undefined, fallback: number): number {
-  if (!raw) return fallback;
+  if (!raw) return Math.min(fallback, MAX_RECORDS_LIMIT);
   const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
+  if (!Number.isFinite(n) || n <= 0) {
+    return Math.min(fallback, MAX_RECORDS_LIMIT);
+  }
+  return Math.min(n, MAX_RECORDS_LIMIT);
 }
 
 /** GET /records/:callSid */
@@ -105,7 +127,14 @@ export async function listRecords(query: {
   };
 }
 
-/** GET /records/by-role/:role */
+/**
+ * GET /records/by-role/:role
+ *
+ * The role path segment is runtime-validated against the
+ * CoTrackProRole enum (H-2 in the code review) — an unknown role
+ * returns 400 instead of silently querying for a nonexistent value
+ * and returning an empty list.
+ */
 export async function listRecordsByRole(
   role: string | undefined,
   query: {
@@ -118,9 +147,16 @@ export async function listRecordsByRole(
   if (!role) {
     return { ok: false, status: 400, body: { error: "Missing role" } };
   }
+  if (!isValidRole(role)) {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: `Unknown role: ${role}` },
+    };
+  }
   const limit = parseLimit(query.limit, 50);
   const lastKey = decodeCursor(query.cursor);
-  const result = await listCallsByRole(role as CoTrackProRole, {
+  const result = await listCallsByRole(role, {
     startDate: query.startDate,
     endDate: query.endDate,
     limit,
@@ -136,7 +172,12 @@ export async function listRecordsByRole(
   };
 }
 
-/** GET /records/by-status/:status */
+/**
+ * GET /records/by-status/:status
+ *
+ * The status path segment is runtime-validated against the
+ * CallStatus enum (H-2 in the code review).
+ */
 export async function listRecordsByStatus(
   status: string | undefined,
   query: {
@@ -149,9 +190,16 @@ export async function listRecordsByStatus(
   if (!status) {
     return { ok: false, status: 400, body: { error: "Missing status" } };
   }
+  if (!isValidStatus(status)) {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: `Unknown status: ${status}` },
+    };
+  }
   const limit = parseLimit(query.limit, 50);
   const lastKey = decodeCursor(query.cursor);
-  const result = await listCallsByStatus(status as CallStatus, {
+  const result = await listCallsByStatus(status, {
     startDate: query.startDate,
     endDate: query.endDate,
     limit,

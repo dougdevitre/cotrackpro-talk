@@ -64,16 +64,33 @@ describe("buildIncomingTwiml", () => {
     assert.match(xml, /<Parameter name="callerNumber" value="\+18885551212"/);
   });
 
-  it("escapes special characters in role", () => {
+  it("normalizes an unknown role to 'parent' (H-3)", () => {
+    // After the H-3 fix, buildIncomingTwiml normalizes unknown roles
+    // via normalizeRole() instead of passing them straight through.
+    // This is the primary defense for the /call/incoming role query
+    // param; the secondary defense (escapeXmlAttr) is still active.
     const xml = buildIncomingTwiml({
       role: 'x"/><Hang/>',
-      callerNumber: "unknown",
+      callerNumber: "+15551234567",
     });
-    assert.ok(!xml.includes('x"'), "raw quote from role must be escaped");
-    assert.ok(
-      !/<Hang\/>/.test(xml.replace(/<Parameter[^>]*>/g, "")),
-      "injected <Hang/> must not appear outside of the escaped attribute",
-    );
+    assert.match(xml, /<Parameter name="role" value="parent"/);
+    assert.ok(!xml.includes("<Hang"), "injected markup must never reach output");
+  });
+
+  it("escapes special characters in callerNumber (which is NOT normalized)", () => {
+    // callerNumber is user-controlled via Twilio's 'From' header and
+    // does NOT go through normalization — only escapeXmlAttr. This
+    // test proves that secondary defense actually works.
+    const xml = buildIncomingTwiml({
+      role: "parent",
+      callerNumber: '"/><Reject/><!--',
+    });
+    // The callerNumber value becomes an escaped XML attribute.
+    assert.ok(!xml.includes('value=""/'), "raw quote break-out must be escaped");
+    // The <Reject/> injection must not appear outside of the
+    // escaped-attribute Parameter tag.
+    const withoutParams = xml.replace(/<Parameter[^>]*\/>/g, "");
+    assert.ok(!withoutParams.includes("<Reject"));
   });
 
   it("produces parseable XML", () => {

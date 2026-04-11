@@ -13,18 +13,72 @@ import assert from "node:assert/strict";
 import {
   authorizeOutbound,
   checkOutboundRateLimit,
+  initiateOutboundCall,
 } from "../src/core/outbound.js";
 import { _resetKvForTests } from "../src/services/kv.js";
+import { _resetPhoneValidationCacheForTests } from "../src/core/phoneValidation.js";
 
 describe("authorizeOutbound", () => {
   // setupEnv doesn't set OUTBOUND_API_KEY so auth is disabled here.
-  // The enabled path is the same predicate — easy to verify manually
-  // by flipping the env before `npm test`. We test disabled semantics.
+  // The enabled path is exercised by tests/auth.test.ts (the shared
+  // bearerMatches helper) — since both authorizeOutbound and
+  // authorizeRecords now delegate to it, one set of tests covers both.
 
   it("returns null when OUTBOUND_API_KEY is unset", () => {
     assert.equal(authorizeOutbound(undefined), null);
     assert.equal(authorizeOutbound("Bearer whatever"), null);
   });
+});
+
+describe("initiateOutboundCall — input validation (C-1)", () => {
+  // These tests exercise the validation that runs BEFORE the Twilio
+  // REST call, so we never hit the network. Any test that reaches
+  // twilioClient.calls.create would fail because there's no mock.
+
+  beforeEach(() => {
+    _resetPhoneValidationCacheForTests();
+  });
+
+  it("returns 400 on missing 'to'", async () => {
+    const r = await initiateOutboundCall({});
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.equal(r.status, 400);
+      assert.match(r.body.error, /Missing 'to'/);
+    }
+  });
+
+  it("returns 400 on a non-E.164 phone number", async () => {
+    const r = await initiateOutboundCall({ to: "15551234567" });
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.equal(r.status, 400);
+      assert.match(r.body.error, /Invalid destination/);
+      assert.match(r.body.details ?? "", /E\.164/);
+    }
+  });
+
+  it("returns 400 on a number from a disallowed country (default US/CA)", async () => {
+    const r = await initiateOutboundCall({ to: "+442071234567" });
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.equal(r.status, 400);
+      assert.match(r.body.details ?? "", /GB/);
+    }
+  });
+
+  it("returns 400 on premium-rate international prefixes", async () => {
+    // UAE premium rate scenario — this is exactly the bill-fraud
+    // surface the fix closes.
+    const r = await initiateOutboundCall({ to: "+971501234567" });
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.equal(r.status, 400);
+  });
+
+  // Note: we do NOT test the success path here because it would make
+  // a real Twilio REST API call. The phone-number validation IS
+  // tested in tests/phoneValidation.test.ts and the Twilio call
+  // itself is left for integration tests.
 });
 
 describe("checkOutboundRateLimit", () => {

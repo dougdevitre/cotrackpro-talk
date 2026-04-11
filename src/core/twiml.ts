@@ -10,6 +10,7 @@
 import twilio from "twilio";
 import { env } from "../config/env.js";
 import { logger } from "../utils/logger.js";
+import { normalizeRole } from "./enumValidation.js";
 
 const log = logger.child({ core: "twiml" });
 
@@ -63,6 +64,10 @@ export function validateTwilioSignature(
  * Build the TwiML response that Twilio receives when a call comes in.
  * Opens a bidirectional Media Stream to the WebSocket host.
  *
+ * Unknown roles are normalized to "parent" with a warning log (H-3
+ * in the code review) so a misconfigured Twilio webhook doesn't
+ * propagate garbage into the call session.
+ *
  * IMPORTANT: wsDomain must point at the long-running WebSocket host
  * (Fargate/Fly/Render), not Vercel. Vercel can't host this.
  */
@@ -70,12 +75,13 @@ export function buildIncomingTwiml(params: {
   role: string;
   callerNumber: string;
 }): string {
+  const role = normalizeRole(params.role);
   const wsUrl = `wss://${env.wsDomain}/call/stream`;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
     <Stream url="${escapeXmlAttr(wsUrl)}">
-      <Parameter name="role" value="${escapeXmlAttr(params.role)}" />
+      <Parameter name="role" value="${escapeXmlAttr(role)}" />
       <Parameter name="callerNumber" value="${escapeXmlAttr(params.callerNumber)}" />
     </Stream>
   </Connect>
@@ -84,7 +90,9 @@ export function buildIncomingTwiml(params: {
 
 /**
  * Build the TwiML used for outbound calls. Same structure as incoming,
- * but tags the direction so the WS handler knows.
+ * but tags the direction so the WS handler knows. Role is assumed to
+ * already be normalized by the caller (`initiateOutboundCall` does
+ * this) — passing it through normalizeRole here would be redundant.
  */
 export function buildOutboundTwiml(params: { role: string }): string {
   const wsUrl = `wss://${env.wsDomain}/call/stream`;

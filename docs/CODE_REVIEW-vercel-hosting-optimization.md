@@ -13,25 +13,41 @@ references let you jump to each one. Issues marked **[action]** are
 things I think should be fixed before the next production deploy;
 **[discuss]** means there's a judgment call; **[nit]** is cosmetic.
 
+## Fix status
+
+Items marked **[FIXED in <commit>]** were addressed in a follow-up
+commit after this review was written, with unit tests added to cover
+the new behavior. The finding text is left in place so the rationale
+stays visible.
+
 ---
 
 ## Severity summary
 
-| Severity | Count | Short description |
-|---|---|---|
-| Critical | 2 | Unvalidated `to` phone number on /call/outbound; timing-safe compare missing on Bearer auth |
-| High | 3 | No upper bound on `parseLimit`; role/status strings cast without validation; incoming TwiML role is user-controlled but role enum is not |
-| Medium | 5 | Rate-limit atomicity across minute+hour; Vercel rewrite query-string fragility; no idempotency key on outbound calls; 4-byte FNV collisions at scale; MemoryKv has no sweep |
-| Low | 4 | Minor typing looseness; dead `log` declaration in places; unused import; `details` field type bleeds across error variants |
-| Nit | 3 | Test helper mocking wart; comment inconsistencies; `_setKvForTests` naming |
+| Severity | Count | Fixed | Short description |
+|---|---|---|---|
+| Critical | 2 | 2 | Unvalidated `to` phone number on /call/outbound; timing-safe compare missing on Bearer auth |
+| High | 3 | 3 | No upper bound on `parseLimit`; role/status strings cast without validation; incoming TwiML role is user-controlled but role enum is not |
+| Medium | 5 | 0 | Rate-limit atomicity across minute+hour; Vercel rewrite query-string fragility; no idempotency key on outbound calls; 4-byte FNV collisions at scale; MemoryKv has no sweep |
+| Low | 4 | 0 | Minor typing looseness; dead `log` declaration in places; unused import; `details` field type bleeds across error variants |
+| Nit | 3 | 0 | Test helper mocking wart; comment inconsistencies; `_setKvForTests` naming |
 
 ---
 
 ## Critical
 
-### C-1. `to` phone number on /call/outbound is not validated [action]
+### C-1. `to` phone number on /call/outbound is not validated [action] **[FIXED]**
 
 **File:** `src/core/outbound.ts:119-166`
+
+**Fix:** New module `src/core/phoneValidation.ts` implements strict
+E.164 validation + a configurable ISO country allow-list
+(`OUTBOUND_ALLOWED_COUNTRY_CODES`, default `"US,CA"`, `"*"` to
+disable). `initiateOutboundCall` now rejects with 400 on non-E.164
+input or a disallowed country before touching the Twilio REST API.
+Tests in `tests/phoneValidation.test.ts` cover both the format and
+allow-list axes, including the UAE premium-rate scenario from the
+original finding.
 
 `initiateOutboundCall` takes `body.to` and passes it straight to
 `twilioClient.calls.create({ to, ... })`. There is no format check, no
@@ -53,11 +69,18 @@ Related: `handlers/outbound.ts` and `api/call/outbound.ts` both just
 forward `body` to `initiateOutboundCall` — the fix belongs in the core
 function, not in each adapter.
 
-### C-2. Bearer token comparison is not timing-safe [action]
+### C-2. Bearer token comparison is not timing-safe [action] **[FIXED]**
 
 **Files:**
 - `src/core/outbound.ts:59` — `authHeader !== \`Bearer ${env.outboundApiKey}\``
 - `src/core/records.ts:36` — same pattern
+
+**Fix:** New module `src/core/auth.ts` exports `bearerMatches`, a
+wrapper around `crypto.timingSafeEqual` that also length-guards (so
+callers don't have to). Both `authorizeOutbound` and
+`authorizeRecords` now delegate to it. Tests in `tests/auth.test.ts`
+cover the matching, length-mismatch, missing-prefix, and unicode
+paths.
 
 JavaScript `!==` on strings short-circuits on the first differing
 character. With a sufficiently chatty attacker this leaks the token
@@ -93,9 +116,14 @@ Then `authorizeOutbound` and `authorizeRecords` both use it.
 
 ## High
 
-### H-1. `parseLimit` has no upper bound [action]
+### H-1. `parseLimit` has no upper bound [action] **[FIXED]**
 
 **File:** `src/core/records.ts:70-74`
+
+**Fix:** `parseLimit` now clamps at `MAX_RECORDS_LIMIT = 100`
+regardless of the caller's input. The fallback is also clamped in
+case a future caller passes a large fallback. Test in
+`tests/records.test.ts` verifies the cap.
 
 `parseLimit` accepts any positive integer, including `?limit=10000000`.
 That triggers a DynamoDB scan for ten million records, which is
@@ -117,11 +145,20 @@ export function parseLimit(raw: string | undefined, fallback: number): number {
 The tests in `tests/records.test.ts:80-82` already document the
 fallback behavior; adding a cap is a one-line change.
 
-### H-2. Role / status query params are cast without validation [action]
+### H-2. Role / status query params are cast without validation [action] **[FIXED]**
 
 **Files:**
 - `src/core/records.ts:123` — `listCallsByRole(role as CoTrackProRole, ...)`
 - `src/core/records.ts:154` — `listCallsByStatus(status as CallStatus, ...)`
+
+**Fix:** New module `src/core/enumValidation.ts` exports
+`VALID_ROLES`, `VALID_STATUSES`, `isValidRole`, `isValidStatus`, and
+a lenient `normalizeRole` for the TwiML handlers. `listRecordsByRole`
+and `listRecordsByStatus` now 400 on unknown values instead of
+silently casting. `buildIncomingTwiml` normalizes the incoming role
+via `normalizeRole` (closes H-3 in the same commit). Tests in
+`tests/enumValidation.test.ts` cover the type predicates,
+normalization, and case sensitivity.
 
 The string comes from URL path segments the caller controls. Casting
 it to the enum type is a lie — there's no runtime check. DynamoDB
@@ -146,10 +183,18 @@ if (!VALID_ROLES.includes(role)) {
 (Or derive the list from the type via a const tuple to keep them in
 sync — see the existing `src/types/index.ts:138-151`.)
 
-### H-3. `role` query param on /call/incoming is reflected into TwiML without an enum check [discuss]
+### H-3. `role` query param on /call/incoming is reflected into TwiML without an enum check [discuss] **[FIXED]**
 
 **File:** `src/core/twiml.ts:61-83` (via `api/call/incoming.ts:45` and
 `src/handlers/twiml.ts:65`)
+
+**Fix:** `buildIncomingTwiml` now normalizes the role via
+`normalizeRole` from `src/core/enumValidation.ts` before stamping it
+into the TwiML. Unknown roles get logged and fall back to "parent"
+rather than propagating into the call session. `escapeXmlAttr` is
+still active as a secondary defense. Test in `tests/twiml.test.ts`
+covers normalization AND verifies that `callerNumber` (which is NOT
+normalized) is still escape-defended.
 
 Any string the caller supplies via `?role=xxx` becomes a Stream
 parameter in the TwiML. `escapeXmlAttr` prevents XML injection, but
@@ -353,16 +398,24 @@ right:
 
 ## Priority for action items
 
-If you only do four things from this review, do these four:
+**UPDATE:** The Critical (C-1, C-2) and High (H-1, H-2, H-3) items
+were all fixed in a follow-up commit. Each fix shipped with unit
+tests. The review text above is preserved for historical context and
+to keep the rationale visible in code review.
 
-1. **C-1** — validate `to` phone number format before Twilio.create. 10 lines.
-2. **C-2** — `timingSafeEqual` for Bearer auth. 15 lines.
-3. **H-1** — cap `parseLimit` at 100. 1 line.
-4. **H-2** — whitelist role/status enums. 20 lines.
+Remaining to address (not yet implemented):
 
-Those are all cheap, all close real gaps, and all testable.
+- **M-1** — Rate limit minute+hour atomicity. Low priority until
+  observability shows it mattering.
+- **M-2** — Vercel rewrite + signed URL fragility. Adds an integration
+  test rather than a code fix; deferred.
+- **M-3** — Idempotency key on Twilio outbound calls. Cheap to add;
+  deferred because the rate limit already caps blast radius.
+- **M-4** — 32-bit FNV collision risk. Document-only at current scale.
+- **M-5** — MemoryKv background sweep. Not observed in practice.
+- **L-1 through L-4** and the nits are cosmetic.
 
 ---
 
-*— Claude, `claude-opus-4-6`, self-review, session
+*— Claude, `claude-opus-4-6`, self-review + follow-up fixes, session
 `01NV6XNwYwEmSQDmxnhM6ezi`.*
