@@ -138,6 +138,64 @@ describe("MemoryKv", () => {
     });
   });
 
+  // ── Pipeline (M-1) ───────────────────────────────────────────────────
+  //
+  // MemoryKv's pipeline is just sequential incrBy calls wrapped in an
+  // array result. It's a drop-in replacement for two split incrBys
+  // and is already atomic in single-threaded JS. The UpstashKv
+  // pipeline (which actually ships commands to the /pipeline
+  // endpoint) is not covered here — testing it requires faking
+  // fetch(). It's exercised end-to-end during rollout.
+
+  describe("pipeline", () => {
+    it("runs a single incrBy and returns its result in an array", async () => {
+      const r = await store.pipeline([
+        { op: "incrBy", key: "k", by: 1 },
+      ]);
+      assert.deepEqual(r, [1]);
+    });
+
+    it("runs multiple incrBys against different keys", async () => {
+      await store.set("alpha", "5"); // pre-existing value
+      const r = await store.pipeline([
+        { op: "incrBy", key: "alpha", by: 1 },
+        { op: "incrBy", key: "beta", by: 3 },
+      ]);
+      assert.deepEqual(r, [6, 3]);
+      assert.equal(await store.get("alpha"), "6");
+      assert.equal(await store.get("beta"), "3");
+    });
+
+    it("respects ttlSeconds on first increment only (matches incrBy semantics)", async () => {
+      mock.timers.enable({ apis: ["Date"] });
+      mock.timers.setTime(1_000_000);
+
+      await store.pipeline([
+        { op: "incrBy", key: "c", by: 1, ttlSeconds: 5 },
+      ]);
+      // Before expiry the counter is still there.
+      mock.timers.tick(2_000);
+      assert.equal(await store.get("c"), "1");
+      // After expiry it's gone.
+      mock.timers.tick(4_000);
+      assert.equal(await store.get("c"), null);
+    });
+
+    it("returns results in the same order as the input", async () => {
+      const r = await store.pipeline([
+        { op: "incrBy", key: "a", by: 10 },
+        { op: "incrBy", key: "b", by: 20 },
+        { op: "incrBy", key: "c", by: 30 },
+      ]);
+      assert.deepEqual(r, [10, 20, 30]);
+    });
+
+    it("is a no-op for an empty op list", async () => {
+      const r = await store.pipeline([]);
+      assert.deepEqual(r, []);
+    });
+  });
+
   // ── Expiry sweep (M-5) ───────────────────────────────────────────────
   //
   // Covers the amortized sweep added to stop a write-heavy,

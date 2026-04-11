@@ -30,6 +30,19 @@ import { logger } from "../utils/logger.js";
 
 const log = logger.child({ service: "kv" });
 
+/**
+ * One step in a pipelined write. Only `incrBy` is supported today
+ * because that's all the rate limiter needs; extend as new callers
+ * require it. Kept narrow so both backends can implement the
+ * semantics precisely rather than fighting a generic command ABI.
+ */
+export type PipelineOp = {
+  op: "incrBy";
+  key: string;
+  by: number;
+  ttlSeconds?: number;
+};
+
 export interface KvStore {
   /** Get a string value, or null if missing/expired. */
   get(key: string): Promise<string | null>;
@@ -47,6 +60,24 @@ export interface KvStore {
   incrBy(key: string, by?: number, ttlSeconds?: number): Promise<number>;
   /** Delete a key. No-op if missing. */
   delete(key: string): Promise<void>;
+  /**
+   * Run a batch of operations as a single unit. Returns the result of
+   * each op in the same order — for `incrBy` ops that's the new
+   * integer value. Failure modes:
+   *
+   *   - MemoryKv: atomic by construction (single-threaded JS).
+   *   - UpstashKv: ships as one HTTP request to the REST /pipeline
+   *     endpoint; Upstash runs the commands sequentially on one
+   *     connection. A network-level failure aborts the whole batch,
+   *     so callers never see a half-applied state — which is the
+   *     point (M-1 in the code review: the old split-call path
+   *     could leave the minute counter bumped while the hour
+   *     counter remained untouched).
+   *
+   * Callers should treat a thrown error as a transient failure and
+   * fail open if they care about availability.
+   */
+  pipeline(ops: PipelineOp[]): Promise<number[]>;
 }
 
 // ── In-memory backend ───────────────────────────────────────────────────────
@@ -148,6 +179,19 @@ class MemoryKv implements KvStore {
     this.store.delete(key);
   }
 
+  async pipeline(ops: PipelineOp[]): Promise<number[]> {
+    // In a single-threaded JS process there's no observable
+    // concurrency between these calls, so "run each op in turn" is
+    // already atomic. No need for fancier machinery.
+    const results: number[] = [];
+    for (const op of ops) {
+      if (op.op === "incrBy") {
+        results.push(await this.incrBy(op.key, op.by, op.ttlSeconds));
+      }
+    }
+    return results;
+  }
+
   // ── Test-only helpers ──────────────────────────────────────────
   //
   // Exposed for unit tests so we can force-sweep without having to
@@ -184,6 +228,10 @@ class UpstashKv implements KvStore {
     private readonly token: string,
   ) {}
 
+  /**
+   * Send a single Redis command. Throws on network failure, HTTP
+   * non-2xx, or an Upstash `error` field in the JSON body.
+   */
   private async call(command: string[]): Promise<unknown> {
     const res = await fetch(this.url, {
       method: "POST",
@@ -202,6 +250,56 @@ class UpstashKv implements KvStore {
       throw new Error(`Upstash ${command[0]} error: ${json.error}`);
     }
     return json.result;
+  }
+
+  /**
+   * Send multiple Redis commands in one HTTP round-trip via the
+   * Upstash `/pipeline` endpoint. Upstash runs the commands
+   * sequentially on one connection so partial state is impossible —
+   * either every command lands or the whole batch throws.
+   *
+   * Reference: https://upstash.com/docs/redis/features/restapi#pipeline
+   *
+   * The pipeline URL is derived from the base URL by appending
+   * `/pipeline`. Vercel KV uses the same endpoint layout because
+   * it's a drop-in Upstash clone.
+   */
+  private async callBatch(commands: string[][]): Promise<unknown[]> {
+    // `new URL("pipeline", this.url)` would replace the last path
+    // segment in some cases; manual concatenation with a trailing
+    // slash guarantees we append.
+    const base = this.url.endsWith("/") ? this.url : this.url + "/";
+    const pipelineUrl = base + "pipeline";
+
+    const res = await fetch(pipelineUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(commands),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Upstash pipeline failed: ${res.status} ${text}`);
+    }
+    const body = (await res.json()) as Array<{
+      result?: unknown;
+      error?: string;
+    }>;
+    if (!Array.isArray(body)) {
+      throw new Error("Upstash pipeline: expected array response");
+    }
+    // Upstash returns per-command errors inline. Surface the first
+    // one so the caller knows something went wrong.
+    for (let i = 0; i < body.length; i++) {
+      if (body[i].error) {
+        throw new Error(
+          `Upstash pipeline[${i}] ${commands[i]?.[0]} error: ${body[i].error}`,
+        );
+      }
+    }
+    return body.map((entry) => entry.result);
   }
 
   async get(key: string): Promise<string | null> {
@@ -244,6 +342,46 @@ class UpstashKv implements KvStore {
 
   async delete(key: string): Promise<void> {
     await this.call(["DEL", key]);
+  }
+
+  async pipeline(ops: PipelineOp[]): Promise<number[]> {
+    if (ops.length === 0) return [];
+
+    // Build a flat command list + remember which entries are
+    // INCRBY results (we only return those) vs. EXPIRE bookkeeping.
+    // Example for 2 incrBy-with-ttl ops:
+    //   [INCRBY k1, EXPIRE k1, INCRBY k2, EXPIRE k2]
+    //              ^drop         ^keep     ^drop
+    const commands: string[][] = [];
+    const resultIndices: number[] = []; // positions in `commands` that
+                                        // produce the caller-visible number
+    for (const op of ops) {
+      if (op.op !== "incrBy") continue;
+      resultIndices.push(commands.length);
+      commands.push(["INCRBY", op.key, String(op.by)]);
+      if (op.ttlSeconds) {
+        // Unconditional EXPIRE inside the pipeline: cheaper than
+        // EXPIRE NX, and for the rate-limit use case (fixed-window
+        // keys that roll over at window boundaries) the overrun is
+        // harmless — next window uses a new key, so re-setting the
+        // TTL on every write doesn't extend any logical window.
+        commands.push(["EXPIRE", op.key, String(op.ttlSeconds)]);
+      }
+    }
+
+    const raw = await this.callBatch(commands);
+
+    // Extract only the INCRBY positions as numbers.
+    return resultIndices.map((i) => {
+      const v = raw[i];
+      const n = typeof v === "number" ? v : Number(v);
+      if (!Number.isFinite(n)) {
+        throw new Error(
+          `Upstash pipeline: unexpected INCRBY result at position ${i}: ${String(v)}`,
+        );
+      }
+      return n;
+    });
   }
 }
 

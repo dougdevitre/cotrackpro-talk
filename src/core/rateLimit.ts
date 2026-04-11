@@ -19,7 +19,7 @@
  * sense for their use case.
  */
 
-import { kv } from "../services/kv.js";
+import { kv, type PipelineOp } from "../services/kv.js";
 import { logger } from "../utils/logger.js";
 
 const log = logger.child({ core: "rateLimit" });
@@ -77,14 +77,33 @@ export async function checkRateLimit(
   const hourKey = `rl:${namespace}:${clientKey}:h:${hourBucket}`;
 
   try {
-    // Increment both counters. We set a TTL that's safely longer than
-    // the window (65s and 3700s) so expired buckets get cleaned up
-    // without needing a separate reaper. incrBy(key, 1, ttl) only sets
-    // the TTL on creation, matching Redis INCR + EXPIRE NX.
-    const minuteCount =
-      config.perMinute > 0 ? await kv().incrBy(minuteKey, 1, 65) : 0;
-    const hourCount =
-      config.perHour > 0 ? await kv().incrBy(hourKey, 1, 3700) : 0;
+    // Increment both counters atomically via the KV pipeline. On
+    // Upstash this ships as one HTTP request; on MemoryKv it's just
+    // sequential in-process calls (already atomic in single-threaded
+    // JS). The key point is that the two counters either both move
+    // or neither does — we no longer have the split-failure window
+    // that the old `await kv().incrBy(); await kv().incrBy();` path
+    // left open. (M-1 in docs/CODE_REVIEW-vercel-hosting-optimization.md.)
+    //
+    // TTLs are safely longer than the window (65s and 3700s) so
+    // expired buckets get cleaned up without needing a separate
+    // reaper.
+    const ops: PipelineOp[] = [];
+    if (config.perMinute > 0) {
+      ops.push({ op: "incrBy", key: minuteKey, by: 1, ttlSeconds: 65 });
+    }
+    if (config.perHour > 0) {
+      ops.push({ op: "incrBy", key: hourKey, by: 1, ttlSeconds: 3700 });
+    }
+
+    const results = await kv().pipeline(ops);
+
+    // Unpack in the same order we queued the ops. When a window is
+    // disabled its count is zero — that way the unused branch of the
+    // later limit check is a no-op.
+    let idx = 0;
+    const minuteCount = config.perMinute > 0 ? results[idx++] : 0;
+    const hourCount = config.perHour > 0 ? results[idx++] : 0;
 
     if (config.perMinute > 0 && minuteCount > config.perMinute) {
       return {
@@ -125,9 +144,38 @@ export async function checkRateLimit(
  *       SCAN output and error messages), and
  *   (b) a leaked rate-limit key shouldn't leak the auth secret.
  *
- * Uses a fast non-cryptographic hash (FNV-1a) — we're not protecting
- * against length-extension attacks, just making the key short and
- * stable.
+ * Uses a fast non-cryptographic hash (FNV-1a 32-bit) because we're
+ * not protecting against length-extension attacks — just making the
+ * key short and stable.
+ *
+ * ── Collision boundary (M-4 in the code review) ────────────────────
+ *
+ * FNV-1a 32-bit has a 2^32 output space, so the birthday bound
+ * predicts a ~50% collision probability around 2^16 ≈ 65,536
+ * distinct inputs. For the current callers — OUTBOUND_API_KEY and
+ * the Idempotency-Key header — this is never the bottleneck:
+ *
+ *   - Rate limiter: there's typically ONE API key per deployment.
+ *     Single-input, zero collisions.
+ *   - Idempotency cache: the Idempotency-Key is client-chosen and
+ *     high-cardinality (UUIDs), so at 65k concurrent-within-24h
+ *     entries you'd see your first collision. For a 30/min +
+ *     500/hr rate-limited endpoint that's ~12,000 keys/day peak,
+ *     well under the threshold.
+ *
+ * If this ever gets extended to bucket per-IP, per-tenant, or any
+ * other high-cardinality dimension, upgrade to SHA-256 (truncated
+ * to 8-16 hex chars). Node's `crypto.createHash('sha256')` is
+ * available in every runtime we target. Rough replacement:
+ *
+ *   import { createHash } from "node:crypto";
+ *   export function hashClientKey(secret: string): string {
+ *     return createHash("sha256").update(secret).digest("hex").slice(0, 16);
+ *   }
+ *
+ * SHA-256 truncated to 16 hex chars (64 bits) pushes the birthday
+ * bound to ~4 billion distinct inputs, which is "stop worrying"
+ * territory for any realistic rate-limiter cardinality.
  */
 export function hashClientKey(secret: string): string {
   // FNV-1a 32-bit

@@ -37,6 +37,9 @@ class ThrowingKv implements KvStore {
   async delete(): Promise<void> {
     throw new Error("kv down");
   }
+  async pipeline(): Promise<number[]> {
+    throw new Error("kv down");
+  }
 }
 
 describe("parseIdempotencyKey", () => {
