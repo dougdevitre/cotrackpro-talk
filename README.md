@@ -49,25 +49,48 @@ cotrackpro-voice-center/
 ├── README.md
 ├── api/                            # Vercel serverless HTTP tier
 │   ├── health.ts
+│   ├── dashboard.ts                # GET /dashboard (vanilla HTML UI)
 │   ├── call/
 │   │   ├── incoming.ts             # POST /call/incoming  (TwiML)
 │   │   ├── status.ts               # POST /call/status    (callback)
 │   │   └── outbound.ts             # POST /call/outbound  (initiate call)
+│   ├── cron/
+│   │   └── cost-rollup.ts          # Vercel Cron target (daily 06:00 UTC)
 │   └── records/
 │       ├── index.ts                # GET  /records
 │       ├── [callSid].ts            # GET / DELETE /records/:callSid
 │       ├── by-role/[role].ts
 │       └── by-status/[status].ts
+├── docs/
+│   └── CODE_REVIEW-vercel-hosting-optimization.md
+├── tests/                          # node:test unit suite (169 tests)
+│   ├── helpers/setupEnv.ts
+│   ├── auth.test.ts
+│   ├── costRollup.test.ts
+│   ├── enumValidation.test.ts
+│   ├── httpAdapter.test.ts
+│   ├── kv.test.ts
+│   ├── outbound.test.ts
+│   ├── phoneValidation.test.ts
+│   ├── rateLimit.test.ts
+│   ├── records.test.ts
+│   ├── sessions.test.ts
+│   └── twiml.test.ts
 └── src/
     ├── index.ts                    # Fastify server (long-running WS host)
     ├── config/
     │   ├── env.ts                  # Validated env config (fail-fast)
     │   └── voices.ts               # Role → ElevenLabs voice ID mapping
     ├── core/                       # Framework-agnostic handler logic
-    │   ├── twiml.ts                # TwiML + Twilio signature validation
+    │   ├── auth.ts                 # Timing-safe Bearer token matcher
+    │   ├── costRollup.ts           # Daily cost aggregation
+    │   ├── enumValidation.ts       # Role / status enum guards
+    │   ├── httpAdapter.ts          # Node HTTP helpers for Vercel
     │   ├── outbound.ts             # Outbound call initiation
+    │   ├── phoneValidation.ts     # E.164 + country allow-list
+    │   ├── rateLimit.ts            # Fixed-window rate limiter
     │   ├── records.ts              # DynamoDB record CRUD
-    │   └── httpAdapter.ts          # Node HTTP helpers for Vercel
+    │   └── twiml.ts                # TwiML + Twilio signature validation
     ├── types/
     │   └── index.ts                # Shared TypeScript types
     ├── utils/
@@ -80,10 +103,11 @@ cotrackpro-voice-center/
     │   └── callHandler.ts          # WebSocket handler — full pipeline
     └── services/
         ├── anthropic.ts            # Claude streaming + CoTrackPro tools
-        ├── elevenlabs.ts           # TTS WebSocket (ulaw_8000)
-        ├── stt.ts                  # STT WebSocket (Scribe realtime)
         ├── dynamo.ts               # DynamoDB call records
-        └── mcp.ts                  # CoTrackPro MCP tool client
+        ├── elevenlabs.ts           # TTS WebSocket (ulaw_8000)
+        ├── kv.ts                   # KV abstraction (memory + Upstash)
+        ├── mcp.ts                  # CoTrackPro MCP tool client
+        └── stt.ts                  # STT WebSocket (Scribe realtime)
 ```
 
 ## Setup
@@ -156,9 +180,16 @@ Call your Twilio number. You should hear the CoTrackPro greeting in the assigned
 |--------|------|-------------|
 | POST | `/call/incoming` | Twilio webhook — returns TwiML to start media stream |
 | WS | `/call/stream` | Bidirectional media stream (Twilio ↔ server) |
-| POST | `/call/outbound` | Initiate outbound call: `{ "to": "+15551234567", "role": "attorney" }` |
+| POST | `/call/outbound` | Initiate outbound call: `{ "to": "+15551234567", "role": "attorney" }`. E.164 format + country allow-list enforced. |
 | POST | `/call/status` | Call status callbacks from Twilio |
-| GET | `/health` | Health check — returns active call count and uptime |
+| GET | `/records` | List recent call records (paginated, Bearer-auth) |
+| GET | `/records/:callSid` | Get a single call record |
+| GET | `/records/by-role/:role` | List calls for a persona |
+| GET | `/records/by-status/:status` | List calls by status |
+| DELETE | `/records/:callSid` | Delete a call record |
+| GET | `/health` | Health check — returns tier + uptime |
+| GET | `/dashboard` | Minimal read-only admin UI (vanilla HTML/JS, Bearer-auth client-side) |
+| GET | `/api/cron/cost-rollup` | Daily cost rollup (Vercel Cron target; `CRON_SECRET` Bearer-auth) |
 
 ### Role selection
 
@@ -168,14 +199,16 @@ Pass `?role=attorney` (or any CoTrackPro role) as a query parameter on the incom
 
 ### Security checklist
 
-- [ ] Validate `X-Twilio-Signature` header on all Twilio webhooks
-- [ ] Store all secrets in AWS SSM Parameter Store (SecureString)
+- [ ] Validate `X-Twilio-Signature` header on all Twilio webhooks (set `VALIDATE_TWILIO_SIGNATURE=true`)
+- [ ] Store all secrets in AWS SSM Parameter Store (SecureString) or Vercel env vars
 - [ ] Enable HTTPS/TLS (required for Twilio WebSocket connections)
 - [ ] Set `NODE_ENV=production` (disables pretty logging)
-- [ ] Add rate limiting to `/call/outbound`
-- [ ] Add authentication to `/call/outbound` (API key or JWT)
+- [x] **Rate limiting on `/call/outbound`** — sliding-window per API key, defaults 30/min and 500/hr. Override via `OUTBOUND_RATE_LIMIT_PER_MIN` / `OUTBOUND_RATE_LIMIT_PER_HOUR`. Shared across the Vercel + WS tiers when Upstash Redis / Vercel KV is configured via `KV_URL` / `KV_TOKEN`.
+- [x] **Authentication on `/call/outbound`** (and `/records`) — Bearer token via `OUTBOUND_API_KEY`, compared with `crypto.timingSafeEqual` to avoid side-channel leaks.
+- [x] **Phone-number validation on `/call/outbound`** — strict E.164 + country allow-list via `OUTBOUND_ALLOWED_COUNTRY_CODES` (default `"US,CA"`, `"*"` to disable). Closes the premium-rate international dial fraud surface if a Bearer token leaks.
 - [ ] Review CoTrackPro MCP server auth (OAuth 2.0 recommended)
 - [ ] Enable ElevenLabs zero-retention mode for HIPAA if applicable
+- [ ] Set `CRON_SECRET` on Vercel (required to gate `/api/cron/cost-rollup`)
 
 ### Deployment options
 
@@ -342,6 +375,8 @@ Each completed call emits a structured log entry with raw metrics and an estimat
 
 Also persisted to the DynamoDB call record as `costSummary`. Create a CloudWatch log metric filter on `cost.call.summary` to plot cost per call over time.
 
+**Daily rollup via Vercel Cron** — `api/cron/cost-rollup.ts` runs at 06:00 UTC daily (scheduled in `vercel.json`), aggregates yesterday's `costSummary` fields into a single `cost.rollup.daily` log line with per-role breakdown, and returns the same totals as JSON if you curl it manually. The endpoint is Bearer-authed via `CRON_SECRET` — Vercel Cron sets this header automatically. Without `CRON_SECRET`, auth is skipped (local-dev escape hatch) and a warning is logged; production must set it.
+
 **Pricing is env-overridable** so you can update as provider pricing changes without redeploying:
 
 | Env var | Default (USD) |
@@ -352,6 +387,24 @@ Also persisted to the DynamoDB call record as `costSummary`. Create a CloudWatch
 | `CLAUDE_CACHE_READ_PRICE_PER_MTOK` | `0.30` |
 | `ELEVENLABS_TTS_PRICE_PER_1K_CHARS` | `0.10` |
 | `ELEVENLABS_STT_PRICE_PER_MIN` | `0.008` |
+
+### Rate limiting on `/call/outbound`
+
+A fixed-window rate limiter (per-minute + per-hour buckets) protects against runaway outbound-call bills if the Bearer token is ever leaked. Limits default to **30/min** and **500/hr** per API key; override via `OUTBOUND_RATE_LIMIT_PER_MIN` / `OUTBOUND_RATE_LIMIT_PER_HOUR`.
+
+The counter lives in the KV store abstraction (`src/services/kv.ts`). In single-host deployments the default in-memory backend is fine. In hybrid deployments set `KV_URL` + `KV_TOKEN` to an Upstash Redis REST endpoint (or Vercel KV, which is API-compatible) so the counter is shared across Vercel serverless functions and the WS host. When the KV is unreachable the limiter **fails open** — a rate-limiter outage shouldn't take down the product.
+
+Rate-limited requests return **429 Too Many Requests** with a `Retry-After` header and a JSON body including `retryAfterSeconds`.
+
+Along with rate limiting, `/call/outbound` now **validates the `to` number** against a strict E.164 regex and a country allow-list (`OUTBOUND_ALLOWED_COUNTRY_CODES`, default `"US,CA"`). This closes the premium-rate international dial fraud surface — even if an attacker drains the full per-hour budget, they can only dial numbers in your allow-list.
+
+### Admin dashboard
+
+A minimal read-only admin UI lives at `/dashboard` (served by `api/dashboard.ts`). Vanilla HTML/JS, zero new dependencies, no framework. Paste your `OUTBOUND_API_KEY` into the key field and it stores it in `localStorage`, then fetches `/records` + `/health` and renders a filterable table of recent calls with per-call cost. Filter by role or status using the dropdowns.
+
+This is deliberately a thin client — there's no server-side session. The real auth gate is the `/records` endpoint, which checks the Bearer token in constant time. The dashboard shell is served to anyone but shows no data without a valid key.
+
+For a richer dashboard (authored sign-in, charts, multi-tenant), replace `api/dashboard.ts` with a Next.js app in the same Vercel project.
 
 ### Fargate rightsizing
 

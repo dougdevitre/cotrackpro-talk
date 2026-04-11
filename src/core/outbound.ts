@@ -10,6 +10,10 @@ import twilio from "twilio";
 import { env } from "../config/env.js";
 import { logger } from "../utils/logger.js";
 import { buildOutboundTwiml } from "./twiml.js";
+import { checkRateLimit, hashClientKey } from "./rateLimit.js";
+import { bearerMatches } from "./auth.js";
+import { validateDialable } from "./phoneValidation.js";
+import { normalizeRole } from "./enumValidation.js";
 
 const log = logger.child({ core: "outbound" });
 
@@ -36,23 +40,82 @@ export type OutboundResult =
     }
   | {
       ok: false;
-      status: 400 | 401 | 500;
-      body: { error: string; details?: string };
+      status: 400 | 401 | 429 | 500;
+      body: {
+        error: string;
+        details?: string;
+        retryAfterSeconds?: number;
+      };
+      /** Optional headers the adapter should set (e.g. Retry-After). */
+      headers?: Record<string, string>;
     };
 
 /**
  * Authorize an outbound request using the Bearer token in the
  * Authorization header. Returns null on success, or an OutboundResult
  * error to return to the caller.
+ *
+ * Comparison is timing-safe via `bearerMatches` to avoid leaking the
+ * token via a character-by-character side channel (see C-2 in
+ * docs/CODE_REVIEW-vercel-hosting-optimization.md).
  */
 export function authorizeOutbound(
   authHeader: string | undefined,
 ): OutboundResult | null {
   if (!env.outboundApiKey) return null; // auth disabled
-  if (!authHeader || authHeader !== `Bearer ${env.outboundApiKey}`) {
+  if (!bearerMatches(authHeader, env.outboundApiKey)) {
     return { ok: false, status: 401, body: { error: "Unauthorized" } };
   }
   return null;
+}
+
+/**
+ * Rate-limit check keyed on the caller's API key (hashed). When the
+ * Bearer token isn't set we key on a literal "anonymous" bucket, so
+ * unauth'd local dev still gets a single shared budget — useful when
+ * testing and not harmful in prod (prod always has the Bearer token).
+ */
+export async function checkOutboundRateLimit(
+  authHeader: string | undefined,
+): Promise<OutboundResult | null> {
+  // Caller identity for rate-limit bucketing. Hash so the KV key
+  // doesn't contain the raw secret.
+  const rawKey = env.outboundApiKey
+    ? (authHeader?.replace(/^Bearer\s+/i, "") ?? "anonymous")
+    : "anonymous";
+  const clientKey = hashClientKey(rawKey);
+
+  const result = await checkRateLimit(clientKey, "outbound", {
+    perMinute: env.outboundRateLimitPerMin,
+    perHour: env.outboundRateLimitPerHour,
+  });
+
+  if (result.allowed) return null;
+
+  const retryAfterSeconds = result.resetAt
+    ? Math.max(1, Math.ceil((result.resetAt - Date.now()) / 1000))
+    : 60;
+
+  log.warn(
+    {
+      clientKey,
+      limitedBy: result.limitedBy,
+      counts: result.counts,
+      retryAfterSeconds,
+    },
+    "Outbound call rate-limited",
+  );
+
+  return {
+    ok: false,
+    status: 429,
+    body: {
+      error: "Too many requests",
+      details: `Rate limit exceeded (${result.limitedBy} window)`,
+      retryAfterSeconds,
+    },
+    headers: { "Retry-After": String(retryAfterSeconds) },
+  };
 }
 
 /**
@@ -71,8 +134,31 @@ export async function initiateOutboundCall(
     };
   }
 
+  // C-1: validate the phone number format and country code BEFORE
+  // handing it to Twilio. A leaked Bearer token could otherwise dial
+  // premium-rate international numbers and run up a bill before the
+  // per-hour rate limit trips. See src/core/phoneValidation.ts.
+  const phoneCheck = validateDialable(body.to);
+  if (!phoneCheck.ok) {
+    log.warn(
+      { to: body.to, reason: phoneCheck.reason },
+      "Outbound call rejected — phone number failed validation",
+    );
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        error: "Invalid destination phone number",
+        details: phoneCheck.detail,
+      },
+    };
+  }
+
+  // Validate role is a known CoTrackPro persona (H-2/H-3 in the code
+  // review). An unknown role would propagate into getVoiceId() and
+  // may fall back or crash — normalizeRole logs and returns "parent".
+  const role = normalizeRole(body.role);
   const to = body.to;
-  const role = body.role ?? "parent";
   const twimlStr = buildOutboundTwiml({ role });
 
   try {

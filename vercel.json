@@ -4,16 +4,27 @@
   "buildCommand": null,
   "installCommand": "npm install",
   "functions": {
+    "api/cron/cost-rollup.ts": {
+      "runtime": "@vercel/node@5",
+      "maxDuration": 60
+    },
     "api/**/*.ts": {
       "runtime": "@vercel/node@5",
       "maxDuration": 30
     }
   },
+  "crons": [
+    {
+      "path": "/api/cron/cost-rollup",
+      "schedule": "0 6 * * *"
+    }
+  ],
   "rewrites": [
     { "source": "/call/incoming", "destination": "/api/call/incoming" },
     { "source": "/call/status", "destination": "/api/call/status" },
     { "source": "/call/outbound", "destination": "/api/call/outbound" },
     { "source": "/health", "destination": "/api/health" },
+    { "source": "/dashboard", "destination": "/api/dashboard" },
     { "source": "/records", "destination": "/api/records" },
     { "source": "/records/by-role/:role", "destination": "/api/records/by-role/:role" },
     { "source": "/records/by-status/:status", "destination": "/api/records/by-status/:status" },

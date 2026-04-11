@@ -2,8 +2,38 @@
  * utils/sessions.ts — In-memory call session store
  *
  * SECURITY: Sessions are ephemeral and scoped to a single call.
- * No PII is persisted to disk. In production, consider Redis with TTL
- * if you need multi-instance session affinity.
+ * No PII is persisted to disk.
+ *
+ * ── Why in-memory (and NOT Redis) ──────────────────────────────────────
+ *
+ * An earlier README TODO suggested "use Redis for session store" for
+ * multi-instance deployments. This turns out to be the wrong move for a
+ * real-time voice pipeline, and the TODO has been retracted. The
+ * correct pattern is:
+ *
+ *   1. Each Twilio Media Stream WebSocket stays pinned to a single WS
+ *      instance for its entire lifetime. No load balancer "stickiness"
+ *      is needed — the WS handshake happens on one instance and the
+ *      same connection delivers every audio chunk until hangup.
+ *   2. Session state (audioBuffer, conversationHistory, voiceId,
+ *      costMetrics, etc.) is therefore correctly scoped to that
+ *      instance. It never needs to be visible to any other process.
+ *   3. `touchSession()` is on the audio hot path — called on every
+ *      inbound media frame. An async Redis GET/SET per frame would
+ *      add real-time latency and blow out the Upstash request budget.
+ *   4. If the instance dies mid-call the WebSocket drops and Twilio
+ *      hangs up; rehydrating session state on another instance
+ *      wouldn't save the call anyway.
+ *
+ * For things that *do* need cross-instance state — rate limits,
+ * idempotency keys, a future active-call-to-instance index for
+ * dashboard or kill-switch use cases — use `src/services/kv.ts`
+ * instead. That's what the KV abstraction is for.
+ *
+ * Horizontal scaling of the WS tier works fine without shared session
+ * state: run N WS instances behind a load balancer, each one handles
+ * whichever calls it happens to receive, Redis is only consulted for
+ * the few things that genuinely need cross-instance coordination.
  */
 
 import type { CallSession, CoTrackProRole } from "../types/index.js";

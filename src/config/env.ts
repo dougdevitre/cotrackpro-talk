@@ -109,4 +109,45 @@ export const env = {
 
   // Voice map override (JSON string)
   voiceMapOverride: process.env.VOICE_MAP || "",
+
+  // ── KV store (cross-instance shared state: rate limits, etc.) ────────
+  // Backend: "auto" (default — uses upstash if KV_URL/KV_TOKEN set, else
+  // memory), "memory", or "upstash".
+  kvBackend: optional("KV_BACKEND", "auto") as "auto" | "memory" | "upstash",
+  // Upstash Redis REST URL + Bearer token. Vercel KV is API-compatible;
+  // set these to Vercel KV's values to use that instead.
+  kvUrl: process.env.KV_URL || "",
+  kvToken: process.env.KV_TOKEN || "",
+
+  // ── Rate limits ──────────────────────────────────────────────────────
+  // Sliding-window rate limit on POST /call/outbound. Protects against
+  // runaway bills if OUTBOUND_API_KEY is ever leaked.
+  outboundRateLimitPerMin: parseInt(
+    optional("OUTBOUND_RATE_LIMIT_PER_MIN", "30"),
+    10,
+  ),
+  outboundRateLimitPerHour: parseInt(
+    optional("OUTBOUND_RATE_LIMIT_PER_HOUR", "500"),
+    10,
+  ),
+
+  // ── Phone number allow-list (C-1 in the code review) ────────────────
+  // Comma-separated ISO-3166 country codes the /call/outbound endpoint
+  // is allowed to dial. Defaults to "US,CA" because that matches the
+  // operational target today. Set to "*" to disable the check entirely
+  // (not recommended — removes bill-fraud protection).
+  outboundAllowedCountryCodes: optional(
+    "OUTBOUND_ALLOWED_COUNTRY_CODES",
+    "US,CA",
+  ),
+
+  // ── Vercel Cron ──────────────────────────────────────────────────────
+  // Shared secret Vercel Cron sends as Bearer token. Required in prod;
+  // leave unset locally to skip auth when testing the cron handler.
+  cronSecret: process.env.CRON_SECRET || "",
+
+  // ── Admin dashboard ──────────────────────────────────────────────────
+  // Optional separate API key for the dashboard. If unset, the dashboard
+  // reuses OUTBOUND_API_KEY (same token it already needs for /records).
+  dashboardApiKey: process.env.DASHBOARD_API_KEY || "",
 } as const;
