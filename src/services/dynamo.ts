@@ -43,9 +43,33 @@ const log = logger.child({ service: "dynamo" });
 
 const isEnabled = env.dynamoEnabled === "true";
 
+/**
+ * DynamoDB client with an explicit retry budget (audit E-4).
+ *
+ * The AWS SDK v3 default is 3 retries with adaptive exponential
+ * backoff, which is fine for background workloads but can add
+ * 100-500ms of tail latency during throttling that hurts real-time
+ * voice calls more than dropping a record would. We pass
+ * `env.dynamoMaxRetries` explicitly (default 3) so operators can
+ * tune the trade-off without redeploying:
+ *
+ *   - Raise it (e.g. 5) if you see persistent throttling and care
+ *     more about record completeness than call latency.
+ *   - Lower it (e.g. 1) for latency-sensitive deployments that
+ *     would rather drop a record than stall the write path.
+ *   - Set it to 0 to disable retries entirely (not recommended).
+ *
+ * Note: the AWS SDK retry strategy only handles *transient* errors
+ * (ProvisionedThroughputExceeded, throttling, 5xx). Deterministic
+ * errors (ConditionalCheckFailed, ValidationException) are not
+ * retried and fail immediately, which is what we want.
+ */
 const _client = isEnabled
   ? DynamoDBDocumentClient.from(
-      new DynamoDBClient({ region: env.dynamoRegion }),
+      new DynamoDBClient({
+        region: env.dynamoRegion,
+        maxAttempts: env.dynamoMaxRetries + 1, // AWS counts the initial try
+      }),
       {
         marshallOptions: { removeUndefinedValues: true },
       },
@@ -74,7 +98,16 @@ export function maskPhoneNumber(phone: string): string {
 
 /**
  * Create a new call record when a call starts.
- * Automatically sets TTL from env.recordsTtlDays unless the caller provided one.
+ * Automatically sets TTL from env.recordsTtlDays unless the caller
+ * provided one.
+ *
+ * Failure mode (audit E-4): after exhausting the retry budget, the
+ * SDK throws. We emit a structured `dynamo.createCallRecord.failed`
+ * log line BEFORE re-throwing so operators have a clean signal to
+ * alert on. The exception is still propagated — the caller
+ * (`callHandler.ts`) decides whether to tear down the call or
+ * continue without persistence, and we don't want to silently
+ * swallow the error here.
  */
 export async function createCallRecord(
   record: CallRecord,
@@ -91,13 +124,32 @@ export async function createCallRecord(
 
   log.info({ callSid: withTtl.callSid, role: withTtl.role, ttl: withTtl.ttl }, "Creating call record");
 
-  await db().send(
-    new PutCommand({
-      TableName: TABLE,
-      Item: withTtl,
-      ConditionExpression: "attribute_not_exists(callSid)",
-    }),
-  );
+  try {
+    await db().send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: withTtl,
+        ConditionExpression: "attribute_not_exists(callSid)",
+      }),
+    );
+  } catch (err) {
+    // Structured error line so alerting on
+    // `msg="dynamo.createCallRecord.failed"` Just Works. Include
+    // enough context to triage without leaking PII (callerNumber is
+    // already masked on the record, so we log it verbatim).
+    log.error(
+      {
+        err,
+        callSid: withTtl.callSid,
+        role: withTtl.role,
+        direction: withTtl.direction,
+        callerNumber: withTtl.callerNumber,
+        dynamoMaxRetries: env.dynamoMaxRetries,
+      },
+      "dynamo.createCallRecord.failed",
+    );
+    throw err;
+  }
 }
 
 // ── READ (single item) ──────────────────────────────────────────────────────

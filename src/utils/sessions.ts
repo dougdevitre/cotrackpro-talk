@@ -38,6 +38,7 @@
 
 import type { CallSession, CoTrackProRole } from "../types/index.js";
 import { getVoiceId } from "../config/voices.js";
+import { env } from "../config/env.js";
 import { logger } from "./logger.js";
 
 // Sessions with no activity for this long are considered zombies (15 min)
@@ -52,6 +53,27 @@ const sessions = new Map<string, CallSession>();
 const streamIndex = new Map<string, string>();
 // Callbacks invoked when a session is force-reaped (so the call handler can clean up)
 const onDestroyCallbacks = new Map<string, () => void>();
+
+// High-water mark tracked for observability. Reset on process restart.
+let peakConcurrentSessions = 0;
+
+/**
+ * Whether a new session would exceed MAX_CONCURRENT_SESSIONS. The WS
+ * handler should call this FIRST, before allocating any STT / Claude /
+ * TTS resources — rejecting early is the whole point of the cap.
+ *
+ * Audit E-2: protects the WS host against WebSocket-flood DoS that
+ * would otherwise OOM the process (each session holds ~20KB of state
+ * plus open Anthropic + ElevenLabs streams).
+ */
+export function isAtCapacity(): boolean {
+  return sessions.size >= env.maxConcurrentSessions;
+}
+
+/** Peak concurrent session count since process start. */
+export function peakSessionCount(): number {
+  return peakConcurrentSessions;
+}
 
 export function createSession(
   callSid: string,
@@ -82,7 +104,20 @@ export function createSession(
   };
   sessions.set(callSid, session);
   streamIndex.set(streamSid, callSid);
-  logger.info({ callSid, role, streamSid }, "Session created");
+  if (sessions.size > peakConcurrentSessions) {
+    peakConcurrentSessions = sessions.size;
+  }
+  logger.info(
+    {
+      callSid,
+      role,
+      streamSid,
+      activeSessions: sessions.size,
+      peak: peakConcurrentSessions,
+      cap: env.maxConcurrentSessions,
+    },
+    "Session created",
+  );
   return session;
 }
 

@@ -39,6 +39,24 @@ process.env.LOG_LEVEL ??= "silent";
 // Individual tests can re-import env or stub these per-test.
 process.env.OUTBOUND_RATE_LIMIT_PER_MIN ??= "1000";
 process.env.OUTBOUND_RATE_LIMIT_PER_HOUR ??= "10000";
+// Records rate limits — set to a low-ish value for the tripping test
+// in tests/records.test.ts (which floods until 429). 150 is enough
+// to cover legitimate test traffic but low enough to trip in <200
+// iterations.
+process.env.RECORDS_RATE_LIMIT_PER_MIN ??= "150";
+process.env.RECORDS_RATE_LIMIT_PER_HOUR ??= "10000";
+
+// E-2 session cap. Set high enough that no tests trip it unless
+// they explicitly test the cap behavior.
+process.env.MAX_CONCURRENT_SESSIONS ??= "1000";
+
+// E-4 dynamo retry budget.
+process.env.DYNAMO_MAX_RETRIES ??= "3";
+
+// E-5 external-service timeouts. Short-ish so timeout tests don't
+// take forever if we ever add them.
+process.env.ANTHROPIC_STREAM_TIMEOUT_MS ??= "5000";
+process.env.ELEVENLABS_CONNECT_TIMEOUT_MS ??= "2000";
 
 // KV backend: memory (default anyway, but be explicit).
 process.env.KV_BACKEND ??= "memory";

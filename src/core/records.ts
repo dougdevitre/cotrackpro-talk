@@ -18,12 +18,23 @@ import {
 } from "../services/dynamo.js";
 import { bearerMatches } from "./auth.js";
 import { isValidRole, isValidStatus } from "./enumValidation.js";
+import { checkRateLimit, hashClientKey } from "./rateLimit.js";
 
 const log = logger.child({ core: "records" });
 
 export type RecordResult<T> =
   | { ok: true; status: 200 | 204; body: T | null }
-  | { ok: false; status: 400 | 401 | 404 | 500; body: { error: string } };
+  | {
+      ok: false;
+      status: 400 | 401 | 404 | 429 | 500;
+      body: {
+        error: string;
+        details?: string;
+        retryAfterSeconds?: number;
+      };
+      /** Optional headers the adapter should set (e.g. Retry-After). */
+      headers?: Record<string, string>;
+    };
 
 export type ListResult = {
   records: CallRecord[];
@@ -44,6 +55,64 @@ export function authorizeRecords(
     return { ok: false, status: 401, body: { error: "Unauthorized" } };
   }
   return null;
+}
+
+/**
+ * Rate-limit check for any /records/* endpoint, keyed on the caller's
+ * hashed API key. Parallels `checkOutboundRateLimit` in
+ * src/core/outbound.ts — same KV backend, same fail-open policy, same
+ * per-minute + per-hour fixed windows.
+ *
+ * Closes audit E-1: previously /records endpoints had Bearer auth but
+ * no rate limit, so a leaked API key could amplify into unbounded
+ * DynamoDB scan cost via `?limit=100&cursor=...` pagination loops.
+ *
+ * Returns null when the request is allowed, or a 429 RecordResult<T>
+ * the adapter sends verbatim. The caller passes the expected `T` so
+ * TypeScript can narrow the (unused) success branch.
+ */
+export async function checkRecordsRateLimit<T>(
+  authHeader: string | undefined,
+): Promise<RecordResult<T> | null> {
+  // Caller identity: when OUTBOUND_API_KEY is set we key on the
+  // presented token (hashed). When it's not, we key on "anonymous"
+  // so local dev still gets a single shared budget.
+  const rawKey = env.outboundApiKey
+    ? (authHeader?.replace(/^Bearer\s+/i, "") ?? "anonymous")
+    : "anonymous";
+  const clientKey = hashClientKey(rawKey);
+
+  const result = await checkRateLimit(clientKey, "records", {
+    perMinute: env.recordsRateLimitPerMin,
+    perHour: env.recordsRateLimitPerHour,
+  });
+
+  if (result.allowed) return null;
+
+  const retryAfterSeconds = result.resetAt
+    ? Math.max(1, Math.ceil((result.resetAt - Date.now()) / 1000))
+    : 60;
+
+  log.warn(
+    {
+      clientKey,
+      limitedBy: result.limitedBy,
+      counts: result.counts,
+      retryAfterSeconds,
+    },
+    "/records rate-limited",
+  );
+
+  return {
+    ok: false,
+    status: 429,
+    body: {
+      error: "Too many requests",
+      details: `Rate limit exceeded (${result.limitedBy} window)`,
+      retryAfterSeconds,
+    },
+    headers: { "Retry-After": String(retryAfterSeconds) },
+  };
 }
 
 /** Base64url-encode a DynamoDB lastKey for use as a pagination cursor. */

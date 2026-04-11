@@ -34,7 +34,14 @@ import type {
   CallSession,
   TranscriptEntry,
 } from "../types/index.js";
-import { createSession, destroySession, touchSession, onSessionDestroy } from "../utils/sessions.js";
+import {
+  createSession,
+  destroySession,
+  isAtCapacity,
+  onSessionDestroy,
+  sessionCount,
+  touchSession,
+} from "../utils/sessions.js";
 import { logger } from "../utils/logger.js";
 import { ElevenLabsStream } from "../services/elevenlabs.js";
 import { STTStream } from "../services/stt.js";
@@ -121,6 +128,35 @@ const SENTENCE_FLUSH_TIMEOUT_MS = 500;
  */
 export async function handleCallStream(twilioWs: WebSocket): Promise<void> {
   const log = logger.child({ handler: "callStream" });
+
+  // ── E-2: Concurrent-session cap ─────────────────────────────────────
+  // Reject new streams BEFORE we allocate any downstream resources
+  // (STT WebSocket, Claude stream, ElevenLabs TTS). The check is
+  // deliberately racy — if two connections arrive at exactly the same
+  // time they could both see `isAtCapacity() === false` and both
+  // proceed, transiently pushing sessionCount past the cap by 1. In
+  // practice that's a rounding error relative to the cap value, and
+  // making it strictly atomic would require locking the accept path
+  // which isn't worth the complexity.
+  //
+  // Twilio Media Streams protocol has no clean way to return an error
+  // code to the caller — the best we can do is close the WS with a
+  // short reason. Twilio will hang up the call and the caller hears a
+  // busy signal. This is the bounded-damage outcome of a flood.
+  if (isAtCapacity()) {
+    log.warn(
+      { sessionCount: sessionCount() },
+      "WS session cap reached — rejecting new Twilio stream",
+    );
+    try {
+      // 1013 = Try Again Later (defined in RFC 6455).
+      twilioWs.close(1013, "server busy");
+    } catch {
+      /* ignore — socket may already be closing */
+    }
+    return;
+  }
+
   let session: CallSession | undefined;
   let sttStream: STTStream | undefined;
   let currentTts: ElevenLabsStream | undefined;

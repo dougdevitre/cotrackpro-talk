@@ -12,12 +12,17 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
-import { requireMethod, sendJson } from "../src/core/httpAdapter.js";
+import {
+  requireMethod,
+  sendJson,
+  stampRequestId,
+} from "../src/core/httpAdapter.js";
 
 export default async function handler(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
+  stampRequestId(req, res);
   if (!requireMethod(req, res, "GET")) return;
   sendJson(res, 200, {
     status: "ok",

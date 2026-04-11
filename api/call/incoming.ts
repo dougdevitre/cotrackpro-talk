@@ -26,12 +26,14 @@ import {
   requireMethod,
   sendStatus,
   sendXml,
+  stampRequestId,
 } from "../../src/core/httpAdapter.js";
 
 export default async function handler(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
+  stampRequestId(req, res);
   if (!requireMethod(req, res, "POST")) return;
 
   const body = await parseBody(req);

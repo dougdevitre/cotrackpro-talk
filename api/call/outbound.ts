@@ -24,6 +24,7 @@ import {
   parseBody,
   requireMethod,
   sendJson,
+  stampRequestId,
 } from "../../src/core/httpAdapter.js";
 
 function sendResult(res: ServerResponse, result: OutboundResult): void {
@@ -39,6 +40,7 @@ export default async function handler(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
+  stampRequestId(req, res);
   if (!requireMethod(req, res, "POST")) return;
 
   const authError = authorizeOutbound(req.headers.authorization);

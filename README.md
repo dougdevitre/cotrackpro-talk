@@ -151,6 +151,15 @@ curl -H "xi-api-key: $ELEVENLABS_API_KEY" https://api.elevenlabs.io/v1/voices
 
 ### 4. Start the server (development)
 
+Two dev-loop options depending on which deployment shape you're
+targeting. See "Deployment options" below for the full production
+story.
+
+#### Option A: Single-host dev loop
+
+Easiest. One process serves both HTTP and WebSocket from the same
+ngrok URL.
+
 ```bash
 # Terminal 1: start ngrok
 ngrok http 8080
@@ -159,6 +168,51 @@ ngrok http 8080
 #   SERVER_DOMAIN=abc123.ngrok-free.app
 npm run dev
 ```
+
+#### Option B: Hybrid dev loop (Vercel HTTP + WS host)
+
+Mirrors production. You run `vercel dev` for the HTTP tier and
+`npm run dev` for the WebSocket tier, then point Twilio at the
+Vercel URL.
+
+```bash
+# Terminal 1: WS host (Fastify, handles /call/stream)
+ngrok http 8080
+# Update .env:
+#   WS_DOMAIN=<ngrok-ws-url>.ngrok-free.app
+#   SERVER_DOMAIN=<same>  # fallback for anything that still reads it
+npm run dev
+
+# Terminal 2: Vercel functions (TwiML, outbound, records, dashboard, cron)
+ngrok http 3000    # second ngrok tunnel for the Vercel port
+# Update .env:
+#   API_DOMAIN=<ngrok-api-url>.ngrok-free.app
+npx vercel dev
+```
+
+The TwiML returned by the Vercel function points `<Stream url>` at
+`WS_DOMAIN`, so Twilio's Media Stream connects directly to the WS
+tunnel. Both tiers share the same `.env` file and the same
+`src/core/*` code; the adapters differ only in how they receive and
+respond to HTTP.
+
+**Gotchas:**
+
+- `vercel dev` reads `vercel.json` rewrites, so
+  `curl http://localhost:3000/call/incoming` hits
+  `api/call/incoming.ts` correctly. Direct `curl .../api/call/...`
+  also works.
+- The `VALIDATE_TWILIO_SIGNATURE=true` flag reconstructs the
+  signed URL from `API_DOMAIN`, not `localhost`. Leave it `false`
+  locally unless you're specifically testing signature validation.
+- Two ngrok tunnels means two `NGROK_AUTHTOKEN`-free tunnels, which
+  requires a paid ngrok plan, OR a workaround: use `ngrok http 8080`
+  for the WS and `cloudflared tunnel` for the Vercel HTTP.
+- The admin dashboard (`/dashboard`) is served by the Vercel tier.
+  It fetches `/records` + `/health` from wherever it's hosted, so
+  if you open it via the Vercel tunnel it'll call the Vercel
+  `/records` endpoint — which is the right behavior for testing
+  hybrid mode.
 
 ### 5. Configure Twilio
 
