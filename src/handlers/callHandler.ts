@@ -32,7 +32,6 @@ import type {
   TwilioStartMessage,
   CoTrackProRole,
   CallSession,
-  TranscriptEntry,
 } from "../types/index.js";
 import {
   createSession,
@@ -70,7 +69,12 @@ import {
   ERROR_GENERIC_TEXT,
   ERROR_TOOL_TEXT,
 } from "../audio/prerecorded.js";
-import { estimateCallCost } from "../utils/costEstimator.js";
+// estimateCallCost is now called from src/core/callCompletion.ts
+// (via finalizeCallCompletion). The direct import was removed as
+// part of Pass 3 of the callHandler refactor.
+import { SentenceBuffer } from "../core/sentenceBuffer.js";
+import { makeSentencePipedCallbacks } from "../core/streamPipeline.js";
+import { finalizeCallCompletion } from "../core/callCompletion.js";
 
 // ── Dependency-injection seam for tests ────────────────────────────────────
 //
@@ -184,13 +188,14 @@ function getRoleGreeting(role: CoTrackProRole): string {
 }
 
 // ── Sentence boundary detection for natural TTS pacing ──────────────────────
-// Matches a sentence-ending punctuation mark followed by whitespace.
-// Uses a lookbehind so the punctuation stays with the preceding sentence.
-const SENTENCE_END = /(?<=[.!?])\s+/;
-
-// If no sentence boundary arrives within this window, flush the buffer
-// to TTS anyway so the caller doesn't hear prolonged silence.
-const SENTENCE_FLUSH_TIMEOUT_MS = 500;
+// Previously this file declared a SENTENCE_END regex + a
+// SENTENCE_FLUSH_TIMEOUT_MS constant and inlined the sentence buffer
+// as closure state inside handleCallStream. Both have moved into the
+// SentenceBuffer class in src/core/sentenceBuffer.ts, which is
+// directly unit-testable via tests/sentenceBuffer.test.ts. The
+// characterization tests in tests/callHandler.test.ts still cover
+// the end-to-end handler behavior, so any regression surfaces at
+// both layers.
 
 /**
  * Handle a Twilio bidirectional media stream WebSocket connection.
@@ -237,11 +242,24 @@ export async function handleCallStream(
   // without extending the real classes.
   let sttStream: SttStreamLike | undefined;
   let currentTts: TtsStreamLike | undefined;
-  let sentenceBuffer = "";
   let isAssistantSpeaking = false;
   let markCounter = 0;
   let pendingUtterance: string | null = null;
-  let sentenceFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  // Sentence-piping state lives in SentenceBuffer (Pass 1 of the
+  // callHandler refactor). Initialized once per call; `reset()` is
+  // called between utterances, `dispose()` on cleanup.
+  const sentenceBuffer = new SentenceBuffer({
+    onSentence: (text) => {
+      // Always send through the CURRENT TTS stream, which may change
+      // between utterances (e.g. after a tool-use round-trip). The
+      // buffer fires synchronously from push/flushRemaining so
+      // currentTts is guaranteed to be set by the time a sentence
+      // is emitted (the onTextDelta / onComplete callbacks in
+      // makeSentencePipedCallbacks ensure currentTts is set before
+      // delegating to the buffer).
+      currentTts?.sendText(text);
+    },
+  });
 
   // ── Helper: send media to Twilio ────────────────────────────────────────
   // Pre-built JSON envelope — avoids JSON.stringify on every audio chunk
@@ -357,26 +375,12 @@ export async function handleCallStream(
     return false;
   }
 
-  // ── Helper: reset the sentence-flush timer ──────────────────────────────
-  // After each text delta, (re)start a timer. If no sentence boundary
-  // arrives within SENTENCE_FLUSH_TIMEOUT_MS, flush the buffer to TTS
-  // so the caller doesn't hear prolonged silence on long clauses.
-  function resetFlushTimer(): void {
-    if (sentenceFlushTimer) clearTimeout(sentenceFlushTimer);
-    sentenceFlushTimer = setTimeout(() => {
-      if (sentenceBuffer.trim() && currentTts) {
-        currentTts.sendText(sentenceBuffer + " ");
-        sentenceBuffer = "";
-      }
-    }, SENTENCE_FLUSH_TIMEOUT_MS);
-  }
-
-  function clearFlushTimer(): void {
-    if (sentenceFlushTimer) {
-      clearTimeout(sentenceFlushTimer);
-      sentenceFlushTimer = null;
-    }
-  }
+  // (sentence buffer / flush timer helpers were removed in Pass 1 of
+  // the callHandler.ts refactor — they now live in src/core/sentenceBuffer.ts
+  // via the `SentenceBuffer` instance declared at the top of this
+  // function. The `push()` / `flushRemaining()` / `reset()` /
+  // `dispose()` API replaces the ad-hoc `resetFlushTimer` +
+  // `clearFlushTimer` helpers that used to live here.)
 
   // ── Helper: mark processing done and drain queued utterance ──────────────
   function finishProcessing(): void {
@@ -388,88 +392,29 @@ export async function handleCallStream(
     }
   }
 
-  // ── Helper: build sentence-piped StreamCallbacks ─────────────────────────
-  // Extracted from processUserUtterance to avoid duplicating the sentence
-  // buffer + flush timer + TTS piping logic between primary and tool paths.
-  //
-  // PR #16's scenario 1 characterization test documented a latent
-  // orphan-TTS bug: the old signature took a `ttsReady: Promise<TtsStreamLike>`
-  // parameter that was eagerly created by `processUserUtterance` before
-  // calling `streamResponse`. But the `if (!currentTts)` check inside
-  // `onTextDelta` was always falsy in practice (because the greeting
-  // path always sets `currentTts` via `speak()` before we arrive here),
-  // so the eager stream was connected and then never used — leaking on
-  // every utterance until the call ended. The characterization test
-  // locked that pattern in as the current behavior so a deliberate fix
-  // would surface as a test failure.
-  //
-  // This is the deliberate fix: the parameter is gone, and the inside
-  // of each callback creates a TTS stream lazily on demand — but only
-  // when there truly isn't one (i.e. never, in the current call flow).
-  // If a future caller invokes `makeSentencePipedCallbacks` with
-  // `currentTts === null` — e.g. a hypothetical "no greeting"
-  // experiment — the lazy creation will still work correctly.
-  //
-  // Scenario 1's golden record was updated in the same PR to reflect
-  // the single-stream observable behavior.
-  function makeSentencePipedCallbacks(
+  // The `makeSentencePipedCallbacks` helper lives in
+  // src/core/streamPipeline.ts as of Pass 2 of the callHandler
+  // refactor. We wrap it below with a thin `buildPipelineCallbacks`
+  // that supplies the handler-scoped context (TTS getter/setter,
+  // sentence buffer, create factory, log).
+  function buildPipelineCallbacks(
     callLog: { info: (...args: unknown[]) => void; error: (...args: unknown[]) => void },
     onDone: (fullText: string) => void,
     onFail: (err: Error) => void,
   ): import("../services/anthropic.js").StreamCallbacks {
-    let firstDeltaReceived = false;
-    const startMs = Date.now();
-
-    return {
-      onTextDelta: async (delta) => {
-        // Lazy TTS creation: in the current call flow `currentTts` is
-        // always truthy here (set by the greeting path or the tool-use
-        // recovery path), so this branch is never taken. Kept for
-        // defensive correctness — if a future code path arrives with
-        // `currentTts === null`, we'll create one on demand rather
-        // than crash.
-        if (!currentTts) {
-          currentTts = await createTtsStream();
-        }
-        if (!firstDeltaReceived) {
-          firstDeltaReceived = true;
-          callLog.info({ ttftMs: Date.now() - startMs }, "Time to first text delta");
-        }
-
-        sentenceBuffer += delta;
-
-        // Send complete sentences to TTS for more natural pacing
-        const parts = sentenceBuffer.split(SENTENCE_END);
-        if (parts.length > 1) {
-          const toSend = parts.slice(0, -1).join(" ") + " ";
-          currentTts?.sendText(toSend);
-          sentenceBuffer = parts[parts.length - 1]!;
-          clearFlushTimer();
-        }
-        if (sentenceBuffer) resetFlushTimer();
+    return makeSentencePipedCallbacks(
+      {
+        getCurrentTts: () => currentTts,
+        setCurrentTts: (tts) => {
+          currentTts = tts;
+        },
+        createTtsStream,
+        sentenceBuffer,
+        log: callLog,
       },
-
-      onComplete: async (fullText) => {
-        clearFlushTimer();
-        // Same defensive-lazy pattern: create a TTS only if we
-        // somehow arrived without one (never happens in the current
-        // flow, but we'd rather crash-loop the current call than
-        // undefined-deref the TTS reference).
-        if (!currentTts) {
-          currentTts = await createTtsStream();
-        }
-        if (sentenceBuffer.trim()) {
-          currentTts.sendText(sentenceBuffer + " ");
-        }
-        currentTts.flush();
-        sentenceBuffer = "";
-
-        callLog.info({ totalMs: Date.now() - startMs }, "Response complete");
-        onDone(fullText);
-      },
-
-      onError: onFail,
-    };
+      onDone,
+      onFail,
+    );
   }
 
   // ── Helper: process a user utterance through Claude → TTS ───────────────
@@ -506,9 +451,9 @@ export async function handleCallStream(
       // because the greeting path already set `currentTts`. The
       // lazy path inside makeSentencePipedCallbacks handles any
       // real cold-start case.
-      sentenceBuffer = "";
+      sentenceBuffer.reset();
 
-      const callbacks = makeSentencePipedCallbacks(
+      const callbacks = buildPipelineCallbacks(
         callLog,
         (fullText) => {
           session!.conversationHistory.push({
@@ -564,9 +509,9 @@ export async function handleCallStream(
           // lazy-create branch inside makeSentencePipedCallbacks
           // never fires — we want the exact stream we just built.
           currentTts = await createTtsStream();
-          sentenceBuffer = "";
+          sentenceBuffer.reset();
 
-          const toolCallbacks = makeSentencePipedCallbacks(
+          const toolCallbacks = buildPipelineCallbacks(
             callLog,
             (fullText) => {
               session!.conversationHistory.push({
@@ -715,43 +660,44 @@ export async function handleCallStream(
 
   // ── Cleanup on disconnect ───────────────────────────────────────────────
   function cleanup(): void {
-    clearFlushTimer();
-    // Close STT/TTS first so their onChars/onSeconds callbacks fire and
-    // populate session.costMetrics BEFORE we finalize the cost summary.
+    // Dispose the sentence buffer first so any in-flight idle timer
+    // can't fire after the TTS stream is closed. The `disposed`
+    // flag also makes any late `push()` or `flushRemaining()` a no-op.
+    sentenceBuffer.dispose();
+    // Close STT/TTS next so their onChars/onSeconds callbacks fire
+    // and populate session.costMetrics BEFORE we finalize the cost
+    // summary.
     sttStream?.close();
     currentTts?.close();
     if (session) {
-      // Persist completed call record to DynamoDB
-      const durationSecs = Math.round((Date.now() - session.createdAt) / 1000);
-      const transcript: TranscriptEntry[] = session.conversationHistory
-        .filter((t) => typeof t.content === "string")
-        .map((t) => ({
-          role: t.role,
-          text: t.content as string,
-          timestamp: new Date(t.timestamp).toISOString(),
-        }));
-      const turnCount = transcript.length;
+      // Pass 3 of the refactor: transcript building + cost summary
+      // calculation live in src/core/callCompletion.ts as pure
+      // functions. This scope keeps only the IO side-effects
+      // (DynamoDB writes + the structured log line) because they
+      // need the handler's logger and error-handling policy.
+      const bundle = finalizeCallCompletion(session);
 
       completeCallRecord(
         session.callSid,
-        new Date().toISOString(),
-        durationSecs,
-        transcript,
-        turnCount,
+        bundle.endedAt,
+        bundle.durationSecs,
+        bundle.transcript,
+        bundle.turnCount,
       ).catch((err) => log.error({ err }, "Failed to complete DynamoDB call record"));
 
-      // Finalize and emit the cost summary for the call
-      const costSummary = estimateCallCost(session.costMetrics);
+      // Emit the structured cost log line. CloudWatch / Vercel
+      // metric filters on `cost.call.summary` plot per-call cost
+      // over time — do not rename without updating the SLO doc.
       log.info(
         {
           callSid: session.callSid,
-          durationSecs,
-          turnCount,
-          ...costSummary,
+          durationSecs: bundle.durationSecs,
+          turnCount: bundle.turnCount,
+          ...bundle.costSummary,
         },
         "cost.call.summary",
       );
-      updateCallCost(session.callSid, costSummary).catch((err) =>
+      updateCallCost(session.callSid, bundle.costSummary).catch((err) =>
         log.error({ err }, "Failed to persist cost summary"),
       );
 
