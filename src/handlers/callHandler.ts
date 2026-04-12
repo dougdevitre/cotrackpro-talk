@@ -32,7 +32,6 @@ import type {
   TwilioStartMessage,
   CoTrackProRole,
   CallSession,
-  TranscriptEntry,
 } from "../types/index.js";
 import {
   createSession,
@@ -70,9 +69,12 @@ import {
   ERROR_GENERIC_TEXT,
   ERROR_TOOL_TEXT,
 } from "../audio/prerecorded.js";
-import { estimateCallCost } from "../utils/costEstimator.js";
+// estimateCallCost is now called from src/core/callCompletion.ts
+// (via finalizeCallCompletion). The direct import was removed as
+// part of Pass 3 of the callHandler refactor.
 import { SentenceBuffer } from "../core/sentenceBuffer.js";
 import { makeSentencePipedCallbacks } from "../core/streamPipeline.js";
+import { finalizeCallCompletion } from "../core/callCompletion.js";
 
 // ── Dependency-injection seam for tests ────────────────────────────────────
 //
@@ -668,37 +670,34 @@ export async function handleCallStream(
     sttStream?.close();
     currentTts?.close();
     if (session) {
-      // Persist completed call record to DynamoDB
-      const durationSecs = Math.round((Date.now() - session.createdAt) / 1000);
-      const transcript: TranscriptEntry[] = session.conversationHistory
-        .filter((t) => typeof t.content === "string")
-        .map((t) => ({
-          role: t.role,
-          text: t.content as string,
-          timestamp: new Date(t.timestamp).toISOString(),
-        }));
-      const turnCount = transcript.length;
+      // Pass 3 of the refactor: transcript building + cost summary
+      // calculation live in src/core/callCompletion.ts as pure
+      // functions. This scope keeps only the IO side-effects
+      // (DynamoDB writes + the structured log line) because they
+      // need the handler's logger and error-handling policy.
+      const bundle = finalizeCallCompletion(session);
 
       completeCallRecord(
         session.callSid,
-        new Date().toISOString(),
-        durationSecs,
-        transcript,
-        turnCount,
+        bundle.endedAt,
+        bundle.durationSecs,
+        bundle.transcript,
+        bundle.turnCount,
       ).catch((err) => log.error({ err }, "Failed to complete DynamoDB call record"));
 
-      // Finalize and emit the cost summary for the call
-      const costSummary = estimateCallCost(session.costMetrics);
+      // Emit the structured cost log line. CloudWatch / Vercel
+      // metric filters on `cost.call.summary` plot per-call cost
+      // over time — do not rename without updating the SLO doc.
       log.info(
         {
           callSid: session.callSid,
-          durationSecs,
-          turnCount,
-          ...costSummary,
+          durationSecs: bundle.durationSecs,
+          turnCount: bundle.turnCount,
+          ...bundle.costSummary,
         },
         "cost.call.summary",
       );
-      updateCallCost(session.callSid, costSummary).catch((err) =>
+      updateCallCost(session.callSid, bundle.costSummary).catch((err) =>
         log.error({ err }, "Failed to persist cost summary"),
       );
 
