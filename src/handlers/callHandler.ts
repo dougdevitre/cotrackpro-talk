@@ -71,6 +71,7 @@ import {
   ERROR_TOOL_TEXT,
 } from "../audio/prerecorded.js";
 import { estimateCallCost } from "../utils/costEstimator.js";
+import { SentenceBuffer } from "../core/sentenceBuffer.js";
 
 // ── Dependency-injection seam for tests ────────────────────────────────────
 //
@@ -184,13 +185,14 @@ function getRoleGreeting(role: CoTrackProRole): string {
 }
 
 // ── Sentence boundary detection for natural TTS pacing ──────────────────────
-// Matches a sentence-ending punctuation mark followed by whitespace.
-// Uses a lookbehind so the punctuation stays with the preceding sentence.
-const SENTENCE_END = /(?<=[.!?])\s+/;
-
-// If no sentence boundary arrives within this window, flush the buffer
-// to TTS anyway so the caller doesn't hear prolonged silence.
-const SENTENCE_FLUSH_TIMEOUT_MS = 500;
+// Previously this file declared a SENTENCE_END regex + a
+// SENTENCE_FLUSH_TIMEOUT_MS constant and inlined the sentence buffer
+// as closure state inside handleCallStream. Both have moved into the
+// SentenceBuffer class in src/core/sentenceBuffer.ts, which is
+// directly unit-testable via tests/sentenceBuffer.test.ts. The
+// characterization tests in tests/callHandler.test.ts still cover
+// the end-to-end handler behavior, so any regression surfaces at
+// both layers.
 
 /**
  * Handle a Twilio bidirectional media stream WebSocket connection.
@@ -237,11 +239,24 @@ export async function handleCallStream(
   // without extending the real classes.
   let sttStream: SttStreamLike | undefined;
   let currentTts: TtsStreamLike | undefined;
-  let sentenceBuffer = "";
   let isAssistantSpeaking = false;
   let markCounter = 0;
   let pendingUtterance: string | null = null;
-  let sentenceFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  // Sentence-piping state lives in SentenceBuffer (Pass 1 of the
+  // callHandler refactor). Initialized once per call; `reset()` is
+  // called between utterances, `dispose()` on cleanup.
+  const sentenceBuffer = new SentenceBuffer({
+    onSentence: (text) => {
+      // Always send through the CURRENT TTS stream, which may change
+      // between utterances (e.g. after a tool-use round-trip). The
+      // buffer fires synchronously from push/flushRemaining so
+      // currentTts is guaranteed to be set by the time a sentence
+      // is emitted (the onTextDelta / onComplete callbacks in
+      // makeSentencePipedCallbacks ensure currentTts is set before
+      // delegating to the buffer).
+      currentTts?.sendText(text);
+    },
+  });
 
   // ── Helper: send media to Twilio ────────────────────────────────────────
   // Pre-built JSON envelope — avoids JSON.stringify on every audio chunk
@@ -357,26 +372,12 @@ export async function handleCallStream(
     return false;
   }
 
-  // ── Helper: reset the sentence-flush timer ──────────────────────────────
-  // After each text delta, (re)start a timer. If no sentence boundary
-  // arrives within SENTENCE_FLUSH_TIMEOUT_MS, flush the buffer to TTS
-  // so the caller doesn't hear prolonged silence on long clauses.
-  function resetFlushTimer(): void {
-    if (sentenceFlushTimer) clearTimeout(sentenceFlushTimer);
-    sentenceFlushTimer = setTimeout(() => {
-      if (sentenceBuffer.trim() && currentTts) {
-        currentTts.sendText(sentenceBuffer + " ");
-        sentenceBuffer = "";
-      }
-    }, SENTENCE_FLUSH_TIMEOUT_MS);
-  }
-
-  function clearFlushTimer(): void {
-    if (sentenceFlushTimer) {
-      clearTimeout(sentenceFlushTimer);
-      sentenceFlushTimer = null;
-    }
-  }
+  // (sentence buffer / flush timer helpers were removed in Pass 1 of
+  // the callHandler.ts refactor — they now live in src/core/sentenceBuffer.ts
+  // via the `SentenceBuffer` instance declared at the top of this
+  // function. The `push()` / `flushRemaining()` / `reset()` /
+  // `dispose()` API replaces the ad-hoc `resetFlushTimer` +
+  // `clearFlushTimer` helpers that used to live here.)
 
   // ── Helper: mark processing done and drain queued utterance ──────────────
   function finishProcessing(): void {
@@ -427,7 +428,10 @@ export async function handleCallStream(
         // recovery path), so this branch is never taken. Kept for
         // defensive correctness — if a future code path arrives with
         // `currentTts === null`, we'll create one on demand rather
-        // than crash.
+        // than crash. The SentenceBuffer's `onSentence` callback
+        // reads `currentTts` on each emit, so creating it here
+        // ensures the closure has a valid reference by the time
+        // a complete sentence is flushed.
         if (!currentTts) {
           currentTts = await createTtsStream();
         }
@@ -436,21 +440,14 @@ export async function handleCallStream(
           callLog.info({ ttftMs: Date.now() - startMs }, "Time to first text delta");
         }
 
-        sentenceBuffer += delta;
-
-        // Send complete sentences to TTS for more natural pacing
-        const parts = sentenceBuffer.split(SENTENCE_END);
-        if (parts.length > 1) {
-          const toSend = parts.slice(0, -1).join(" ") + " ";
-          currentTts?.sendText(toSend);
-          sentenceBuffer = parts[parts.length - 1]!;
-          clearFlushTimer();
-        }
-        if (sentenceBuffer) resetFlushTimer();
+        // Let the SentenceBuffer own the boundary detection, the
+        // partial retention, and the idle-flush timer. It'll fire
+        // our onSentence callback (defined at the top of
+        // handleCallStream) when a complete sentence is ready.
+        sentenceBuffer.push(delta);
       },
 
       onComplete: async (fullText) => {
-        clearFlushTimer();
         // Same defensive-lazy pattern: create a TTS only if we
         // somehow arrived without one (never happens in the current
         // flow, but we'd rather crash-loop the current call than
@@ -458,11 +455,11 @@ export async function handleCallStream(
         if (!currentTts) {
           currentTts = await createTtsStream();
         }
-        if (sentenceBuffer.trim()) {
-          currentTts.sendText(sentenceBuffer + " ");
-        }
+        // Drain any trailing partial as a final "sentence" so the
+        // TTS receives the full response. Then flush the ElevenLabs
+        // stream to signal end-of-input for this utterance.
+        sentenceBuffer.flushRemaining();
         currentTts.flush();
-        sentenceBuffer = "";
 
         callLog.info({ totalMs: Date.now() - startMs }, "Response complete");
         onDone(fullText);
@@ -506,7 +503,7 @@ export async function handleCallStream(
       // because the greeting path already set `currentTts`. The
       // lazy path inside makeSentencePipedCallbacks handles any
       // real cold-start case.
-      sentenceBuffer = "";
+      sentenceBuffer.reset();
 
       const callbacks = makeSentencePipedCallbacks(
         callLog,
@@ -564,7 +561,7 @@ export async function handleCallStream(
           // lazy-create branch inside makeSentencePipedCallbacks
           // never fires — we want the exact stream we just built.
           currentTts = await createTtsStream();
-          sentenceBuffer = "";
+          sentenceBuffer.reset();
 
           const toolCallbacks = makeSentencePipedCallbacks(
             callLog,
@@ -715,9 +712,13 @@ export async function handleCallStream(
 
   // ── Cleanup on disconnect ───────────────────────────────────────────────
   function cleanup(): void {
-    clearFlushTimer();
-    // Close STT/TTS first so their onChars/onSeconds callbacks fire and
-    // populate session.costMetrics BEFORE we finalize the cost summary.
+    // Dispose the sentence buffer first so any in-flight idle timer
+    // can't fire after the TTS stream is closed. The `disposed`
+    // flag also makes any late `push()` or `flushRemaining()` a no-op.
+    sentenceBuffer.dispose();
+    // Close STT/TTS next so their onChars/onSeconds callbacks fire
+    // and populate session.costMetrics BEFORE we finalize the cost
+    // summary.
     sttStream?.close();
     currentTts?.close();
     if (session) {
