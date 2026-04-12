@@ -66,7 +66,7 @@ export default async function handler(
     return;
   }
 
-  const authError = authorizeRecords(req.headers.authorization);
+  const authError = await authorizeRecords(req.headers.authorization);
   if (authError) {
     sendResult(res, authError);
     return;

@@ -47,9 +47,15 @@ export type ListResult = {
  * Uses `bearerMatches` for a timing-safe comparison — see C-2 in
  * docs/CODE_REVIEW-vercel-hosting-optimization.md.
  */
-export function authorizeRecords(
+export async function authorizeRecords(
   authHeader: string | undefined,
-): { ok: false; status: 401; body: { error: string } } | null {
+): Promise<{ ok: false; status: 401; body: { error: string } } | null> {
+  // Try Clerk JWT first
+  const { verifyClerkToken } = await import("./clerkAuth.js");
+  const clerk = await verifyClerkToken(authHeader);
+  if (clerk.authenticated) return null;
+
+  // Fall back to API key
   if (!env.outboundApiKey) return null;
   if (!bearerMatches(authHeader, env.outboundApiKey)) {
     return { ok: false, status: 401, body: { error: "Unauthorized" } };

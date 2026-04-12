@@ -28,8 +28,10 @@ function sendResult(reply: FastifyReply, result: OutboundResult): FastifyReply {
 
 export function registerOutboundRoutes(app: FastifyInstance): void {
   app.post("/call/outbound", async (request, reply) => {
-    const authError = authorizeOutbound(request.headers.authorization);
+    const { result: authError, userId } = await authorizeOutbound(request.headers.authorization);
     if (authError) return sendResult(reply, authError);
+    // Attach Clerk userId to request for downstream use (call records)
+    if (userId) (request as typeof request & { clerkUserId?: string }).clerkUserId = userId;
 
     const rateLimitError = await checkOutboundRateLimit(
       request.headers.authorization,
