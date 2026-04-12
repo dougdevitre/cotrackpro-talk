@@ -140,14 +140,24 @@ export type OutboundResult =
  * token via a character-by-character side channel (see C-2 in
  * docs/CODE_REVIEW-vercel-hosting-optimization.md).
  */
-export function authorizeOutbound(
+export async function authorizeOutbound(
   authHeader: string | undefined,
-): OutboundResult | null {
-  if (!env.outboundApiKey) return null; // auth disabled
-  if (!bearerMatches(authHeader, env.outboundApiKey)) {
-    return { ok: false, status: 401, body: { error: "Unauthorized" } };
+): Promise<{ result: OutboundResult | null; userId?: string }> {
+  if (!env.outboundApiKey && !env.clerkSecretKey) return { result: null }; // auth disabled
+
+  // Try Clerk JWT first (browser-based sub-app calls)
+  const { verifyClerkToken } = await import("./clerkAuth.js");
+  const clerk = await verifyClerkToken(authHeader);
+  if (clerk.authenticated) {
+    return { result: null, userId: clerk.userId };
   }
-  return null;
+
+  // Fall back to API key
+  if (!env.outboundApiKey) return { result: null };
+  if (!bearerMatches(authHeader, env.outboundApiKey)) {
+    return { result: { ok: false, status: 401, body: { error: "Unauthorized" } } };
+  }
+  return { result: null };
 }
 
 /**

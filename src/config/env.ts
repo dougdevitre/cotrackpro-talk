@@ -82,6 +82,10 @@ export const env = {
   // CoTrackPro MCP
   cotrackproMcpUrl: optional("COTRACKPRO_MCP_URL", "https://mcp.cotrackpro.com/sse"),
 
+  // Clerk (federated auth from CoTrackPro sub-apps)
+  clerkPublishableKey: process.env.CLERK_PUBLISHABLE_KEY || "",
+  clerkSecretKey: process.env.CLERK_SECRET_KEY || "",
+
   // Outbound API auth (set to require Bearer token on /call/outbound)
   outboundApiKey: process.env.OUTBOUND_API_KEY || "",
 

@@ -45,7 +45,7 @@ export function registerRecordRoutes(app: FastifyInstance): void {
   // chew through the authenticated caller's rate budget.
   app.addHook("preHandler", async (request: FastifyRequest, reply: FastifyReply) => {
     if (!request.url.startsWith("/records")) return;
-    const authError = authorizeRecords(request.headers.authorization);
+    const authError = await authorizeRecords(request.headers.authorization);
     if (authError) {
       return reply.status(authError.status).send(authError.body);
     }

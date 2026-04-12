@@ -43,7 +43,7 @@ export default async function handler(
   stampRequestId(req, res);
   if (!requireMethod(req, res, "POST")) return;
 
-  const authError = authorizeOutbound(req.headers.authorization);
+  const { result: authError } = await authorizeOutbound(req.headers.authorization);
   if (authError) {
     sendResult(res, authError);
     return;
