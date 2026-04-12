@@ -72,6 +72,7 @@ import {
 } from "../audio/prerecorded.js";
 import { estimateCallCost } from "../utils/costEstimator.js";
 import { SentenceBuffer } from "../core/sentenceBuffer.js";
+import { makeSentencePipedCallbacks } from "../core/streamPipeline.js";
 
 // ── Dependency-injection seam for tests ────────────────────────────────────
 //
@@ -389,84 +390,29 @@ export async function handleCallStream(
     }
   }
 
-  // ── Helper: build sentence-piped StreamCallbacks ─────────────────────────
-  // Extracted from processUserUtterance to avoid duplicating the sentence
-  // buffer + flush timer + TTS piping logic between primary and tool paths.
-  //
-  // PR #16's scenario 1 characterization test documented a latent
-  // orphan-TTS bug: the old signature took a `ttsReady: Promise<TtsStreamLike>`
-  // parameter that was eagerly created by `processUserUtterance` before
-  // calling `streamResponse`. But the `if (!currentTts)` check inside
-  // `onTextDelta` was always falsy in practice (because the greeting
-  // path always sets `currentTts` via `speak()` before we arrive here),
-  // so the eager stream was connected and then never used — leaking on
-  // every utterance until the call ended. The characterization test
-  // locked that pattern in as the current behavior so a deliberate fix
-  // would surface as a test failure.
-  //
-  // This is the deliberate fix: the parameter is gone, and the inside
-  // of each callback creates a TTS stream lazily on demand — but only
-  // when there truly isn't one (i.e. never, in the current call flow).
-  // If a future caller invokes `makeSentencePipedCallbacks` with
-  // `currentTts === null` — e.g. a hypothetical "no greeting"
-  // experiment — the lazy creation will still work correctly.
-  //
-  // Scenario 1's golden record was updated in the same PR to reflect
-  // the single-stream observable behavior.
-  function makeSentencePipedCallbacks(
+  // The `makeSentencePipedCallbacks` helper lives in
+  // src/core/streamPipeline.ts as of Pass 2 of the callHandler
+  // refactor. We wrap it below with a thin `buildPipelineCallbacks`
+  // that supplies the handler-scoped context (TTS getter/setter,
+  // sentence buffer, create factory, log).
+  function buildPipelineCallbacks(
     callLog: { info: (...args: unknown[]) => void; error: (...args: unknown[]) => void },
     onDone: (fullText: string) => void,
     onFail: (err: Error) => void,
   ): import("../services/anthropic.js").StreamCallbacks {
-    let firstDeltaReceived = false;
-    const startMs = Date.now();
-
-    return {
-      onTextDelta: async (delta) => {
-        // Lazy TTS creation: in the current call flow `currentTts` is
-        // always truthy here (set by the greeting path or the tool-use
-        // recovery path), so this branch is never taken. Kept for
-        // defensive correctness — if a future code path arrives with
-        // `currentTts === null`, we'll create one on demand rather
-        // than crash. The SentenceBuffer's `onSentence` callback
-        // reads `currentTts` on each emit, so creating it here
-        // ensures the closure has a valid reference by the time
-        // a complete sentence is flushed.
-        if (!currentTts) {
-          currentTts = await createTtsStream();
-        }
-        if (!firstDeltaReceived) {
-          firstDeltaReceived = true;
-          callLog.info({ ttftMs: Date.now() - startMs }, "Time to first text delta");
-        }
-
-        // Let the SentenceBuffer own the boundary detection, the
-        // partial retention, and the idle-flush timer. It'll fire
-        // our onSentence callback (defined at the top of
-        // handleCallStream) when a complete sentence is ready.
-        sentenceBuffer.push(delta);
+    return makeSentencePipedCallbacks(
+      {
+        getCurrentTts: () => currentTts,
+        setCurrentTts: (tts) => {
+          currentTts = tts;
+        },
+        createTtsStream,
+        sentenceBuffer,
+        log: callLog,
       },
-
-      onComplete: async (fullText) => {
-        // Same defensive-lazy pattern: create a TTS only if we
-        // somehow arrived without one (never happens in the current
-        // flow, but we'd rather crash-loop the current call than
-        // undefined-deref the TTS reference).
-        if (!currentTts) {
-          currentTts = await createTtsStream();
-        }
-        // Drain any trailing partial as a final "sentence" so the
-        // TTS receives the full response. Then flush the ElevenLabs
-        // stream to signal end-of-input for this utterance.
-        sentenceBuffer.flushRemaining();
-        currentTts.flush();
-
-        callLog.info({ totalMs: Date.now() - startMs }, "Response complete");
-        onDone(fullText);
-      },
-
-      onError: onFail,
-    };
+      onDone,
+      onFail,
+    );
   }
 
   // ── Helper: process a user utterance through Claude → TTS ───────────────
@@ -505,7 +451,7 @@ export async function handleCallStream(
       // real cold-start case.
       sentenceBuffer.reset();
 
-      const callbacks = makeSentencePipedCallbacks(
+      const callbacks = buildPipelineCallbacks(
         callLog,
         (fullText) => {
           session!.conversationHistory.push({
@@ -563,7 +509,7 @@ export async function handleCallStream(
           currentTts = await createTtsStream();
           sentenceBuffer.reset();
 
-          const toolCallbacks = makeSentencePipedCallbacks(
+          const toolCallbacks = buildPipelineCallbacks(
             callLog,
             (fullText) => {
               session!.conversationHistory.push({
