@@ -106,9 +106,9 @@ describe("parseLimit", () => {
 describe("authorizeRecords", () => {
   // setupEnv does NOT set OUTBOUND_API_KEY so auth is disabled in
   // this test file. Check disabled semantics first.
-  it("returns null (= allow) when OUTBOUND_API_KEY is unset", () => {
-    assert.equal(authorizeRecords(undefined), null);
-    assert.equal(authorizeRecords("Bearer whatever"), null);
+  it("returns null (= allow) when OUTBOUND_API_KEY is unset", async () => {
+    assert.equal(await authorizeRecords(undefined), null);
+    assert.equal(await authorizeRecords("Bearer whatever"), null);
   });
 
   // Enabled-auth path is exercised indirectly by the outbound.test.ts
