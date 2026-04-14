@@ -30,9 +30,9 @@ describe("authorizeOutbound", () => {
   // bearerMatches helper) — since both authorizeOutbound and
   // authorizeRecords now delegate to it, one set of tests covers both.
 
-  it("returns null when OUTBOUND_API_KEY is unset", () => {
-    assert.equal(authorizeOutbound(undefined), null);
-    assert.equal(authorizeOutbound("Bearer whatever"), null);
+  it("returns null result when OUTBOUND_API_KEY is unset", async () => {
+    assert.deepEqual(await authorizeOutbound(undefined), { result: null });
+    assert.deepEqual(await authorizeOutbound("Bearer whatever"), { result: null });
   });
 });
 
