@@ -146,6 +146,10 @@ export const env = {
     optional("RECORDS_RATE_LIMIT_PER_HOUR", "2000"),
     10,
   ),
+  // Per-user budget on POST /api/ai/complete — shared across every sub-app
+  // a Clerk user touches, so one compromised sub-app can't amplify abuse.
+  aiRateLimitPerMin: parseInt(optional("AI_RATE_LIMIT_PER_MIN", "20"), 10),
+  aiRateLimitPerHour: parseInt(optional("AI_RATE_LIMIT_PER_HOUR", "300"), 10),
 
   // ── Concurrent-call cap (audit E-2) ─────────────────────────────────
   // Hard ceiling on simultaneous WS sessions on a single WS host. New
