@@ -49,13 +49,34 @@ export type ListResult = {
  */
 export async function authorizeRecords(
   authHeader: string | undefined,
-): Promise<{ ok: false; status: 401; body: { error: string } } | null> {
+): Promise<
+  | { ok: false; status: 401 | 500; body: { error: string; details?: string } }
+  | null
+> {
   // Try Clerk JWT first
   const { verifyClerkToken } = await import("./clerkAuth.js");
   const clerk = await verifyClerkToken(authHeader);
   if (clerk.authenticated) return null;
 
-  // Fall back to API key
+  // Fall back to API key. Fail closed in production when no auth is
+  // configured at all — an unauth'd /records is a DynamoDB-scan and
+  // PII leak (call records contain phone numbers, role, transcripts).
+  if (!env.outboundApiKey && !env.clerkSecretKey) {
+    if (env.nodeEnv === "production") {
+      log.error(
+        "Both OUTBOUND_API_KEY and CLERK_SECRET_KEY are unset in production — refusing to authorize /records.",
+      );
+      return {
+        ok: false,
+        status: 500,
+        body: {
+          error: "Server misconfigured",
+          details: "OUTBOUND_API_KEY or CLERK_SECRET_KEY is required in production",
+        },
+      };
+    }
+    return null;
+  }
   if (!env.outboundApiKey) return null;
   if (!bearerMatches(authHeader, env.outboundApiKey)) {
     return { ok: false, status: 401, body: { error: "Unauthorized" } };

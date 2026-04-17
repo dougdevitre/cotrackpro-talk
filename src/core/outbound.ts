@@ -143,7 +143,27 @@ export type OutboundResult =
 export async function authorizeOutbound(
   authHeader: string | undefined,
 ): Promise<{ result: OutboundResult | null; userId?: string }> {
-  if (!env.outboundApiKey && !env.clerkSecretKey) return { result: null }; // auth disabled
+  if (!env.outboundApiKey && !env.clerkSecretKey) {
+    // Fail closed in production. An unauth'd /call/outbound is a direct
+    // path to billing fraud (a leaked URL → unbounded Twilio dials).
+    // Mirrors the cron-handler pattern in api/cron/cost-rollup.ts.
+    if (env.nodeEnv === "production") {
+      log.error(
+        "Both OUTBOUND_API_KEY and CLERK_SECRET_KEY are unset in production — refusing to authorize outbound calls.",
+      );
+      return {
+        result: {
+          ok: false,
+          status: 500,
+          body: {
+            error: "Server misconfigured",
+            details: "OUTBOUND_API_KEY or CLERK_SECRET_KEY is required in production",
+          },
+        },
+      };
+    }
+    return { result: null }; // auth disabled (non-prod escape hatch)
+  }
 
   // Try Clerk JWT first (browser-based sub-app calls)
   const { verifyClerkToken } = await import("./clerkAuth.js");

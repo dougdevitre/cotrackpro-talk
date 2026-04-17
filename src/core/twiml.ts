@@ -24,8 +24,17 @@ export function escapeXmlAttr(str: string): string {
     .replace(/>/g, "&gt;");
 }
 
-/** Whether Twilio signature validation is enabled via env. */
+/** Whether Twilio signature validation is enabled.
+ *
+ * In production, validation is ALWAYS on regardless of the env var —
+ * leaving it off in prod lets anyone POST forged Twilio webhooks to
+ * /call/incoming and /call/status, which can spoof call status, return
+ * arbitrary TwiML, and amplify into Anthropic + ElevenLabs cost via
+ * downstream stream sessions. Outside production we honor the env var
+ * so local dev / test environments can run without real Twilio creds.
+ */
 export function signatureValidationEnabled(): boolean {
+  if (env.nodeEnv === "production") return true;
   return env.validateTwilioSignature === "true";
 }
 

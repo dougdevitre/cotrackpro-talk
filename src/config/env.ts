@@ -98,8 +98,13 @@ export const env = {
   // Set to "true" to enable DynamoDB persistence (disabled by default so
   // the app runs without AWS credentials during local development)
   dynamoEnabled: optional("DYNAMO_ENABLED", "false"),
-  // Retention (days) for call records before DynamoDB TTL auto-deletes them
-  recordsTtlDays: parseFloat(optional("RECORDS_TTL_DAYS", "365")),
+  // Retention (days) for call records before DynamoDB TTL auto-deletes them.
+  // Guarded against malformed input — `parseFloat("abc")` returns NaN, which
+  // would propagate into a TTL calc that silently writes garbage timestamps.
+  recordsTtlDays: (() => {
+    const n = parseFloat(optional("RECORDS_TTL_DAYS", "365"));
+    return Number.isFinite(n) && n > 0 ? n : 365;
+  })(),
 
   // Pricing (USD per million tokens / per 1K chars / per minute) — used by
   // the cost estimator. Override via env as prices change.
