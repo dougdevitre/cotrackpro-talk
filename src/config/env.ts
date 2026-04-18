@@ -74,10 +74,28 @@ export const env = {
   // ElevenLabs
   elevenLabsApiKey: required("ELEVENLABS_API_KEY"),
   elevenLabsModelId: optional("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5"),
+  // Default voice for the browser TTS proxy (/api/ai/tts). Separate
+  // from the telephony voice because the in-app UI can afford a
+  // warmer, longer-latency voice than a phone call needs. Set to any
+  // valid ElevenLabs voice_id.
+  elevenLabsTtsVoiceId: optional("ELEVENLABS_TTS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL"),
+  // Output format for /api/ai/tts. Browsers accept mp3 everywhere; the
+  // audio/ulaw variants are telephony-only.
+  elevenLabsTtsOutputFormat: optional("ELEVENLABS_TTS_OUTPUT_FORMAT", "mp3_44100_128"),
+  // Hard cap on characters per /api/ai/tts request. ElevenLabs bills
+  // per char; capping here protects against cost blow-ups from a
+  // compromised browser.
+  ttsMaxCharsPerRequest: parseInt(optional("TTS_MAX_CHARS_PER_REQUEST", "1500"), 10),
 
   // Anthropic
   anthropicApiKey: required("ANTHROPIC_API_KEY"),
   anthropicModel: optional("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
+  // Default model for the sub-app proxy (/api/ai/complete) when a
+  // caller doesn't pass `model` explicitly. Separate from anthropicModel
+  // because the voice pipeline and the sub-apps have different
+  // latency/quality tradeoffs: phone calls want Sonnet for TTFB, sub-app
+  // UIs want Opus for reasoning quality.
+  anthropicSubappModel: optional("ANTHROPIC_SUBAPP_MODEL", "claude-opus-4-7"),
 
   // CoTrackPro MCP
   cotrackproMcpUrl: optional("COTRACKPRO_MCP_URL", "https://mcp.cotrackpro.com/sse"),
@@ -155,6 +173,12 @@ export const env = {
   // a Clerk user touches, so one compromised sub-app can't amplify abuse.
   aiRateLimitPerMin: parseInt(optional("AI_RATE_LIMIT_PER_MIN", "20"), 10),
   aiRateLimitPerHour: parseInt(optional("AI_RATE_LIMIT_PER_HOUR", "300"), 10),
+  // Per-user budget on POST /api/ai/tts. ElevenLabs charges per char
+  // and each request can be up to TTS_MAX_CHARS_PER_REQUEST, so this
+  // budget multiplied by that cap is the worst-case spend per user
+  // per window. Keep tight.
+  ttsRateLimitPerMin: parseInt(optional("TTS_RATE_LIMIT_PER_MIN", "10"), 10),
+  ttsRateLimitPerHour: parseInt(optional("TTS_RATE_LIMIT_PER_HOUR", "100"), 10),
 
   // ── Concurrent-call cap (audit E-2) ─────────────────────────────────
   // Hard ceiling on simultaneous WS sessions on a single WS host. New

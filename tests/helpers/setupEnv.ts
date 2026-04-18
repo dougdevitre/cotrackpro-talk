@@ -25,6 +25,15 @@ process.env.TWILIO_PHONE_NUMBER ??= "+15551234567";
 process.env.ELEVENLABS_API_KEY ??= "test_elevenlabs_key";
 process.env.ANTHROPIC_API_KEY ??= "test_anthropic_key";
 
+// Clerk secret — used by the sub-app AI+TTS proxies. Set to a fake so
+// authorize() doesn't return 500 "AI proxy not configured". Tests
+// that need to simulate "unset" have to branch on env-load, not on
+// mutations after import. We intentionally leave CLERK_PUBLISHABLE_KEY
+// unset so verifyClerkToken short-circuits to authenticated=false —
+// that gives the proxies a clean 401 path to assert against without
+// needing to craft real JWTs.
+process.env.CLERK_SECRET_KEY ??= "sk_test_fake_for_tests";
+
 // Domain — set SERVER_DOMAIN so single-host resolution works without
 // requiring API_DOMAIN/WS_DOMAIN separately.
 process.env.SERVER_DOMAIN ??= "test.example.com";

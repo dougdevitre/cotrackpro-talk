@@ -221,7 +221,7 @@ function validate(body: AiCompleteRequest | undefined): {
   const system = typeof body.system === "string" ? body.system : undefined;
   const model = typeof body.model === "string" && body.model.length > 0
     ? body.model
-    : env.anthropicModel;
+    : env.anthropicSubappModel;
   const maxTokens = Math.min(
     MAX_TOKENS_CAP,
     typeof body.max_tokens === "number" && body.max_tokens > 0
