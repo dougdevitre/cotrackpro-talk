@@ -122,13 +122,42 @@ jobs:
       - name: Ensure Fly app exists
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          # Optional repo variable escape hatch for multi-org tokens
+          # or auto-detect edge cases. Set at:
+          # https://github.com/<owner>/<repo>/settings/variables/actions
+          FLY_ORG_OVERRIDE: ${{ vars.FLY_ORG }}
         run: |
           if fly apps list -j | grep -q "\"Name\":\"$FLY_APP_NAME\""; then
             echo "app $FLY_APP_NAME exists"
-          else
-            echo "creating app $FLY_APP_NAME"
-            fly apps create "$FLY_APP_NAME"
+            exit 0
           fi
+
+          # Non-interactive `fly apps create` needs an org slug. Pick it:
+          # 1. Honor an explicit FLY_ORG repo variable if set.
+          # 2. Otherwise auto-detect from the token's accessible orgs
+          #    (org-scoped tokens see exactly one).
+          if [ -n "$FLY_ORG_OVERRIDE" ]; then
+            org="$FLY_ORG_OVERRIDE"
+            echo "using FLY_ORG override: $org"
+          else
+            # fly orgs list -j can return either an array of org objects
+            # or an object keyed by slug, depending on the flyctl version.
+            # Handle both shapes.
+            org=$(fly orgs list -j | jq -r '
+              if type == "array" then (.[0].Slug // .[0].slug // empty)
+              else (keys // [])[0] // empty
+              end
+            ')
+            if [ -z "$org" ] || [ "$org" = "null" ]; then
+              echo "::error::Could not auto-detect Fly org from token."
+              echo "::error::Set FLY_ORG repo variable at https://github.com/${{ github.repository }}/settings/variables/actions"
+              exit 1
+            fi
+            echo "auto-detected Fly org slug: $org"
+          fi
+
+          echo "creating app $FLY_APP_NAME in org $org"
+          fly apps create "$FLY_APP_NAME" -o "$org"
 
       - name: Stage Fly secrets
         env:
