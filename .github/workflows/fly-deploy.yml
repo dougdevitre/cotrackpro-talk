@@ -1,0 +1,123 @@
+name: Deploy to Fly
+
+# Builds the Docker image and deploys the voice center to Fly.io. Pulls
+# the app's runtime secrets from AWS SSM Parameter Store (canonical
+# source) and pushes them into Fly's secrets store on every run, then
+# deploys. Idempotent — running twice with no changes is a no-op.
+#
+# Required repository secrets:
+#   FLY_API_TOKEN          — from https://fly.io/user/personal_access_tokens
+#   AWS_ACCESS_KEY_ID      — IAM user with ssm:GetParameter on /cotrackpro/prod/*
+#   AWS_SECRET_ACCESS_KEY  — paired with the access key above
+#
+# Optional repository variables:
+#   FLY_APP_NAME           — defaults to "cotrackpro-talk"
+#   AWS_REGION             — defaults to "us-east-1"
+#   SSM_PREFIX             — defaults to "/cotrackpro/prod"
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "api/**"
+      - "package*.json"
+      - "tsconfig*.json"
+      - "Dockerfile"
+      - "fly.toml"
+      - ".dockerignore"
+      - ".github/workflows/fly-deploy.yml"
+
+concurrency:
+  group: fly-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build + deploy to Fly
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FLY_APP_NAME: ${{ vars.FLY_APP_NAME || 'cotrackpro-talk' }}
+      AWS_REGION:   ${{ vars.AWS_REGION || 'us-east-1' }}
+      SSM_PREFIX:   ${{ vars.SSM_PREFIX || '/cotrackpro/prod' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Pull runtime secrets from Parameter Store
+        id: ssm
+        run: |
+          # Pull each SSM value, mask it in logs, and stash for the
+          # Fly secrets step. Mapping (SSM suffix → env var):
+          mapping=(
+            "twilio/account_sid:TWILIO_ACCOUNT_SID"
+            "twilio/auth_token:TWILIO_AUTH_TOKEN"
+            "twilio/phone_number:TWILIO_PHONE_NUMBER"
+            "elevenlabs/api_key:ELEVENLABS_API_KEY"
+            "anthropic/api_key:ANTHROPIC_API_KEY"
+            "voice/inbound_phone_map:INBOUND_PHONE_VOICE_MAP"
+          )
+          : > "$RUNNER_TEMP/secrets.env"
+          for pair in "${mapping[@]}"; do
+            suffix="${pair%%:*}"
+            name="${pair##*:}"
+            value=$(aws ssm get-parameter \
+              --name "$SSM_PREFIX/$suffix" \
+              --with-decryption \
+              --query 'Parameter.Value' --output text)
+            # Mask so the value never appears in subsequent log output.
+            echo "::add-mask::$value"
+            # Single-quoted so JSON values pass through intact.
+            printf "%s=%q\n" "$name" "$value" >> "$RUNNER_TEMP/secrets.env"
+          done
+          # Add the two static settings:
+          printf "%s=%q\n" "SERVER_DOMAIN" "$FLY_APP_NAME.fly.dev" >> "$RUNNER_TEMP/secrets.env"
+          printf "%s=%q\n" "VALIDATE_TWILIO_SIGNATURE" "true" >> "$RUNNER_TEMP/secrets.env"
+          echo "wrote $(wc -l < $RUNNER_TEMP/secrets.env) entries"
+
+      - name: Setup flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Ensure Fly app exists
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          if fly apps list -j | grep -q "\"Name\":\"$FLY_APP_NAME\""; then
+            echo "app $FLY_APP_NAME exists"
+          else
+            echo "creating app $FLY_APP_NAME"
+            fly apps create "$FLY_APP_NAME"
+          fi
+
+      - name: Stage Fly secrets
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          # --stage defers the implicit re-deploy until our explicit
+          # deploy step. Otherwise fly secrets set triggers a second
+          # rollout and we waste a build.
+          args=()
+          while IFS= read -r line; do
+            args+=("$line")
+          done < "$RUNNER_TEMP/secrets.env"
+          # shellcheck disable=SC2068
+          fly secrets set ${args[@]} --stage -a "$FLY_APP_NAME"
+
+      - name: Deploy
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: fly deploy --remote-only -a "$FLY_APP_NAME"
+
+      - name: Print live URL
+        run: |
+          echo "::notice title=Live at::https://$FLY_APP_NAME.fly.dev"
+          echo "Live at https://$FLY_APP_NAME.fly.dev"
