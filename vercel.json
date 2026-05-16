@@ -5,11 +5,9 @@
   "installCommand": "npm install",
   "functions": {
     "api/cron/cost-rollup.ts": {
-      "runtime": "@vercel/node@5",
       "maxDuration": 60
     },
     "api/**/*.ts": {
-      "runtime": "@vercel/node@5",
       "maxDuration": 30
     }
   },
