@@ -125,15 +125,19 @@ export function buildSignedWebhookUrl(
 export function buildIncomingTwiml(params: {
   role: string;
   callerNumber: string;
+  voiceId?: string;
 }): string {
   const role = normalizeRole(params.role);
   const wsUrl = `wss://${env.wsDomain}/call/stream`;
+  const voiceIdParam = params.voiceId
+    ? `\n      <Parameter name="voiceId" value="${escapeXmlAttr(params.voiceId)}" />`
+    : "";
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
     <Stream url="${escapeXmlAttr(wsUrl)}">
       <Parameter name="role" value="${escapeXmlAttr(role)}" />
-      <Parameter name="callerNumber" value="${escapeXmlAttr(params.callerNumber)}" />
+      <Parameter name="callerNumber" value="${escapeXmlAttr(params.callerNumber)}" />${voiceIdParam}
     </Stream>
   </Connect>
 </Response>`;

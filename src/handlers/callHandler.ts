@@ -561,8 +561,12 @@ export async function handleCallStream(
 
           // Determine role from custom parameters (default: parent)
           const role = (startMsg.start.customParameters?.role as CoTrackProRole) || "parent";
+          // Optional per-call voice override set by /call/incoming via
+          // INBOUND_PHONE_VOICE_MAP. When absent, createSession falls
+          // back to getVoiceId(role).
+          const voiceIdOverride = startMsg.start.customParameters?.voiceId;
 
-          session = createSession(callSid, streamSid, role);
+          session = createSession(callSid, streamSid, role, voiceIdOverride);
           initMediaPrefix(streamSid);
 
           // Persist call record to DynamoDB

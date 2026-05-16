@@ -249,6 +249,16 @@ Call your Twilio number. You should hear the CoTrackPro greeting in the assigned
 
 Pass `?role=attorney` (or any CoTrackPro role) as a query parameter on the incoming webhook URL to select the voice persona. Supported roles: `parent`, `attorney`, `gal`, `judge`, `therapist`, `school_counselor`, `law_enforcement`, `mediator`, `advocate`, `kid_teen`, `social_worker`, `cps`, `evaluator`.
 
+### Per-phone voice overrides
+
+Set `INBOUND_PHONE_VOICE_MAP` to a JSON object keyed by E.164 phone number to pin a specific ElevenLabs voice + role for inbound calls to that number, without a code change. The map is consulted by `/call/incoming`; matching entries override the `?role=` query param and the role-based voice default.
+
+```json
+{ "+13143948500": { "voiceId": "2ydcbtd5sJZRYFMNgMVZ", "role": "parent" } }
+```
+
+Canonical source is AWS SSM at `/cotrackpro/prod/voice/inbound_phone_map`; `scripts/sync-ssm-to-vercel.sh` mirrors that value (and the other secrets) to Vercel env vars. To point a Twilio number at this app's webhook programmatically, run `npm run configure:twilio -- +13143948500` (uses `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN` + `API_DOMAIN`).
+
 ## Production Deployment
 
 ### Security checklist

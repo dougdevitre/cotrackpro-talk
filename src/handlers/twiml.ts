@@ -22,6 +22,7 @@ import {
   signatureValidationEnabled,
   validateTwilioSignature,
 } from "../core/twiml.js";
+import { lookupInboundPhone } from "../config/inboundPhoneMap.js";
 
 const log = logger.child({ handler: "twiml" });
 
@@ -62,8 +63,12 @@ export function registerTwimlRoutes(app: FastifyInstance): void {
     const body = request.body as Record<string, string> | undefined;
     const { from } = logIncomingCall(body);
 
-    const role = (request.query as Record<string, string>)?.role ?? "parent";
-    const twiml = buildIncomingTwiml({ role, callerNumber: from });
+    // Per-phone override: see api/call/incoming.ts for context.
+    const entry = lookupInboundPhone(body?.To);
+    const role =
+      entry?.role ?? (request.query as Record<string, string>)?.role ?? "parent";
+    const voiceId = entry?.voiceId;
+    const twiml = buildIncomingTwiml({ role, callerNumber: from, voiceId });
 
     reply.type("text/xml").send(twiml);
   });

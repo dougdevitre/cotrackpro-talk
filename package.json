@@ -10,7 +10,8 @@
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test": "node --import tsx --test tests/*.test.ts",
-    "generate-audio": "tsx scripts/generate-prerecorded.ts"
+    "generate-audio": "tsx scripts/generate-prerecorded.ts",
+    "configure:twilio": "tsx scripts/configure-twilio-number.ts"
   },
   "engines": {
     "node": ">=20.0.0"

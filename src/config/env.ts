@@ -137,6 +137,14 @@ export const env = {
   // Voice map override (JSON string)
   voiceMapOverride: process.env.VOICE_MAP || "",
 
+  // Per-phone-number override for inbound calls. JSON object keyed by
+  // E.164 number → { voiceId, role }. Consulted by /call/incoming so
+  // a single Twilio number can be pinned to a specific voice + persona
+  // without a code change. Empty string disables the lookup (falls
+  // back to the role query param + getVoiceId(role) default).
+  // Example: {"+13143948500":{"voiceId":"2ydcbtd5sJZRYFMNgMVZ","role":"parent"}}
+  inboundPhoneVoiceMap: process.env.INBOUND_PHONE_VOICE_MAP || "",
+
   // ── KV store (cross-instance shared state: rate limits, etc.) ────────
   // Backend: "auto" (default — uses upstash if KV_URL/KV_TOKEN set, else
   // memory), "memory", or "upstash".
