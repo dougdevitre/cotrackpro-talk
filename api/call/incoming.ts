@@ -21,6 +21,7 @@ import {
   validateTwilioSignature,
 } from "../../src/core/twiml.js";
 import { lookupInboundPhone } from "../../src/config/inboundPhoneMap.js";
+import { logger } from "../../src/utils/logger.js";
 import {
   parseBody,
   parseQuery,
@@ -57,13 +58,19 @@ export default async function handler(
     return;
   }
 
-  const { from } = logIncomingCall(body);
+  const { from, callSid } = logIncomingCall(body);
   // Per-phone override: if INBOUND_PHONE_VOICE_MAP contains an entry
   // for the Twilio "To" number, it wins over the ?role= query param
   // and pins both the persona and the ElevenLabs voice for this call.
   const entry = lookupInboundPhone(body?.To);
   const role = entry?.role ?? query.role ?? "parent";
   const voiceId = entry?.voiceId;
+  if (entry) {
+    logger.info(
+      { callSid, to: body?.To, role, voiceId },
+      "Inbound phone map match",
+    );
+  }
   const twiml = buildIncomingTwiml({ role, callerNumber: from, voiceId });
   sendXml(res, 200, twiml);
 }

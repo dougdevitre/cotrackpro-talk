@@ -15,6 +15,8 @@
 import type { CoTrackProRole } from "../types/index.js";
 import { env } from "./env.js";
 import { logger } from "../utils/logger.js";
+import { isValidRole } from "../core/enumValidation.js";
+import { isValidVoiceId } from "../core/tts.js";
 
 const log = logger.child({ config: "inboundPhoneMap" });
 
@@ -54,8 +56,16 @@ export function parseInboundPhoneMap(raw: string | undefined): InboundPhoneMap {
       log.warn({ key: k }, "Skipping malformed inbound phone entry");
       continue;
     }
+    if (!isValidVoiceId(entry.voiceId)) {
+      log.warn({ key: k, voiceId: entry.voiceId }, "Skipping inbound phone entry — voiceId failed format check");
+      continue;
+    }
+    if (!isValidRole(entry.role)) {
+      log.warn({ key: k, role: entry.role }, "Skipping inbound phone entry — role not in VALID_ROLES");
+      continue;
+    }
     const key = normalize(k);
-    if (key) out[key] = { voiceId: entry.voiceId, role: entry.role as CoTrackProRole };
+    if (key) out[key] = { voiceId: entry.voiceId, role: entry.role };
   }
   return out;
 }

@@ -31,9 +31,32 @@ describe("parseInboundPhoneMap", () => {
   it("skips entries missing voiceId or role", () => {
     const m = parseInboundPhoneMap(
       JSON.stringify({
-        "+13143948500": { voiceId: "abc", role: "parent" },
-        "+15550000000": { voiceId: "abc" },         // missing role
-        "+15551111111": { role: "parent" },          // missing voiceId
+        "+13143948500": { voiceId: "2ydcbtd5sJZRYFMNgMVZ", role: "parent" },
+        "+15550000000": { voiceId: "2ydcbtd5sJZRYFMNgMVZ" }, // missing role
+        "+15551111111": { role: "parent" },                  // missing voiceId
+      }),
+    );
+    assert.deepEqual(Object.keys(m), ["+13143948500"]);
+  });
+
+  it("rejects entries whose voiceId fails the format check", () => {
+    const m = parseInboundPhoneMap(
+      JSON.stringify({
+        "+13143948500": { voiceId: "2ydcbtd5sJZRYFMNgMVZ", role: "parent" },
+        "+15552222222": { voiceId: "../etc/passwd",       role: "parent" },
+        "+15553333333": { voiceId: "short",                role: "parent" },
+        "+15554444444": { voiceId: "has spaces in id 0000", role: "parent" },
+      }),
+    );
+    assert.deepEqual(Object.keys(m), ["+13143948500"]);
+  });
+
+  it("rejects entries whose role is not in VALID_ROLES", () => {
+    const m = parseInboundPhoneMap(
+      JSON.stringify({
+        "+13143948500": { voiceId: "2ydcbtd5sJZRYFMNgMVZ", role: "parent" },
+        "+15555555555": { voiceId: "2ydcbtd5sJZRYFMNgMVZ", role: "parnt" }, // typo
+        "+15556666666": { voiceId: "2ydcbtd5sJZRYFMNgMVZ", role: "admin" }, // not a role
       }),
     );
     assert.deepEqual(Object.keys(m), ["+13143948500"]);
@@ -42,8 +65,8 @@ describe("parseInboundPhoneMap", () => {
   it("normalizes keys to E.164 with leading +", () => {
     const m = parseInboundPhoneMap(
       JSON.stringify({
-        "13143948500":      { voiceId: "v1", role: "parent" },
-        "+1 (555) 000-0000": { voiceId: "v2", role: "attorney" },
+        "13143948500":       { voiceId: "2ydcbtd5sJZRYFMNgMVZ", role: "parent" },
+        "+1 (555) 000-0000": { voiceId: "EXAVITQu4vr4xnSDxMaL", role: "attorney" },
       }),
     );
     assert.ok(m["+13143948500"]);

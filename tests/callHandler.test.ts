@@ -467,6 +467,46 @@ describe("handleCallStream — characterization tests", () => {
     assert.equal(session!.role, "parent");
   });
 
+  it("per-phone override: malformed voiceId on start frame is discarded, falling back to role default", async () => {
+    const wiring = setupFakeWiring();
+    const socket = new FakeTwilioSocket();
+    await handleCallStream(socket as unknown as WebSocket, wiring.deps);
+    socket.emitMessage({ event: "connected", protocol: "Call", version: "1.0.0" });
+    socket.emitMessage({
+      event: "start",
+      sequenceNumber: "1",
+      streamSid: "MZstream-bogus-voice",
+      start: {
+        streamSid: "MZstream-bogus-voice",
+        accountSid: "ACtest",
+        callSid: "CA-characterization-10",
+        tracks: ["inbound"],
+        customParameters: {
+          role: "parent",
+          callerNumber: "+15551234567",
+          // Path-traversal attempt — must NOT reach ElevenLabs URL.
+          voiceId: "../../../etc/passwd",
+        },
+        mediaFormat: { encoding: "audio/x-mulaw", sampleRate: 8000, channels: 1 },
+      },
+    });
+    await waitFor(
+      () =>
+        wiring.ttsCreated.length >= 1 &&
+        wiring.ttsCreated[0]!.flushed === true,
+      { label: "greeting TTS flushed for malformed-voice scenario" },
+    );
+    const session = getSession("CA-characterization-10");
+    assert.ok(session, "session should exist after start frame");
+    // Falls back to the role's mapped voice — definitely NOT the
+    // path-traversal string.
+    assert.notEqual(session!.voiceId, "../../../etc/passwd");
+    assert.ok(
+      /^[A-Za-z0-9]{16,32}$/.test(session!.voiceId),
+      "session voiceId should pass the format check after fallback",
+    );
+  });
+
   // ────────────────────────────────────────────────────────────────
   // Scenario 2: Barge-in
   //

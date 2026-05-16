@@ -75,6 +75,7 @@ import {
 import { SentenceBuffer } from "../core/sentenceBuffer.js";
 import { makeSentencePipedCallbacks } from "../core/streamPipeline.js";
 import { finalizeCallCompletion } from "../core/callCompletion.js";
+import { isValidVoiceId } from "../core/tts.js";
 
 // ── Dependency-injection seam for tests ────────────────────────────────────
 //
@@ -562,9 +563,23 @@ export async function handleCallStream(
           // Determine role from custom parameters (default: parent)
           const role = (startMsg.start.customParameters?.role as CoTrackProRole) || "parent";
           // Optional per-call voice override set by /call/incoming via
-          // INBOUND_PHONE_VOICE_MAP. When absent, createSession falls
-          // back to getVoiceId(role).
-          const voiceIdOverride = startMsg.start.customParameters?.voiceId;
+          // INBOUND_PHONE_VOICE_MAP. The WS handshake is not signed
+          // (Twilio signs the HTTP webhook, not the WS), so re-validate
+          // the value's shape before letting it flow into the ElevenLabs
+          // path-segment URL. When absent or malformed, createSession
+          // falls back to getVoiceId(role).
+          const rawVoiceId = startMsg.start.customParameters?.voiceId;
+          let voiceIdOverride: string | undefined;
+          if (rawVoiceId !== undefined) {
+            if (isValidVoiceId(rawVoiceId)) {
+              voiceIdOverride = rawVoiceId;
+            } else {
+              log.warn(
+                { callSid, voiceId: rawVoiceId },
+                "Discarding voiceId override — failed format check",
+              );
+            }
+          }
 
           session = createSession(callSid, streamSid, role, voiceIdOverride);
           initMediaPrefix(streamSid);
