@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import {
   parseInboundPhoneMap,
   lookupInboundPhoneIn,
+  validateInboundPhoneMap,
 } from "../src/config/inboundPhoneMap.js";
 
 describe("parseInboundPhoneMap", () => {
@@ -96,5 +97,106 @@ describe("lookupInboundPhoneIn", () => {
     assert.equal(lookupInboundPhoneIn(m, "+15555555555"), null);
     assert.equal(lookupInboundPhoneIn(m, ""), null);
     assert.equal(lookupInboundPhoneIn(m, undefined), null);
+  });
+});
+
+describe("validateInboundPhoneMap (strict, used by lint:config)", () => {
+  const VALID_ID = "2ydcbtd5sJZRYFMNgMVZ";
+
+  it("treats empty/undefined input as valid (no overrides is a valid state)", () => {
+    const a = validateInboundPhoneMap(undefined);
+    const b = validateInboundPhoneMap("");
+    assert.equal(a.ok, true);
+    assert.equal(b.ok, true);
+    if (a.ok && b.ok) {
+      assert.deepEqual(a.map, {});
+      assert.deepEqual(b.map, {});
+    }
+  });
+
+  it("returns an error with /JSON/ message on malformed JSON", () => {
+    const r = validateInboundPhoneMap("{not json");
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.equal(r.errors.length, 1);
+      assert.match(r.errors[0]!.message, /JSON/);
+    }
+  });
+
+  it("rejects non-object top-level values", () => {
+    for (const raw of ["[]", '"+13143948500"', "null", "42"]) {
+      const r = validateInboundPhoneMap(raw);
+      assert.equal(r.ok, false, `expected error for ${raw}`);
+      if (!r.ok) {
+        assert.match(r.errors[0]!.message, /object/);
+      }
+    }
+  });
+
+  it("flags entries with a bad voiceId and names the offending key", () => {
+    const r = validateInboundPhoneMap(
+      JSON.stringify({
+        "+13143948500": { voiceId: VALID_ID, role: "parent" },
+        "+15552222222": { voiceId: "../etc/passwd", role: "parent" },
+      }),
+    );
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      const bad = r.errors.find((e) => e.key === "+15552222222");
+      assert.ok(bad, "error should reference the offending key");
+      assert.match(bad!.message, /voiceId/);
+    }
+  });
+
+  it("flags entries whose role is not in VALID_ROLES", () => {
+    const r = validateInboundPhoneMap(
+      JSON.stringify({
+        "+13143948500": { voiceId: VALID_ID, role: "parnt" },
+      }),
+    );
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.match(r.errors[0]!.message, /role/);
+    }
+  });
+
+  it("collapses duplicate keys after normalization and flags the collision", () => {
+    const r = validateInboundPhoneMap(
+      JSON.stringify({
+        "+13143948500": { voiceId: VALID_ID, role: "parent" },
+        "13143948500":   { voiceId: VALID_ID, role: "attorney" },
+      }),
+    );
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      const dup = r.errors.find((e) => /collide|collision/i.test(e.message));
+      assert.ok(dup, "should flag the normalization collision");
+    }
+  });
+
+  it("accepts a well-formed map and returns the parsed result", () => {
+    const r = validateInboundPhoneMap(
+      JSON.stringify({
+        "+13143948500": { voiceId: VALID_ID, role: "parent" },
+        "+15550000000": { voiceId: "EXAVITQu4vr4xnSDxMaL", role: "attorney" },
+      }),
+    );
+    assert.equal(r.ok, true);
+    if (r.ok) {
+      assert.deepEqual(Object.keys(r.map).sort(), ["+13143948500", "+15550000000"]);
+      assert.equal(r.map["+13143948500"]!.role, "parent");
+    }
+  });
+
+  it("round-trips on lenient + strict for the same well-formed input", () => {
+    const raw = JSON.stringify({
+      "+13143948500": { voiceId: VALID_ID, role: "parent" },
+    });
+    const strict = validateInboundPhoneMap(raw);
+    const lenient = parseInboundPhoneMap(raw);
+    assert.equal(strict.ok, true);
+    if (strict.ok) {
+      assert.deepEqual(strict.map, lenient);
+    }
   });
 });

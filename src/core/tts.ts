@@ -55,16 +55,12 @@ const ALLOWED_OUTPUT_FORMATS = new Set([
   "mp3_44100_192",
 ]);
 
-// Very light voice_id sanity check. ElevenLabs voice IDs are 20-char
-// alphanumeric strings; rejecting anything else prevents header
-// injection or URL smuggling via the path segment.
-export const VOICE_ID_RE = /^[A-Za-z0-9]{16,32}$/;
-
-/** Test whether a string is a syntactically-valid ElevenLabs voice ID.
- *  Reused by the phone-map parser and the WS call handler. */
-export function isValidVoiceId(v: unknown): v is string {
-  return typeof v === "string" && VOICE_ID_RE.test(v);
-}
+// The canonical voice-ID regex + predicate now live in
+// src/core/voiceIdFormat.ts (pure, no env). Re-exported here so
+// existing consumers (tests, the phone-map parser, the WS handler)
+// don't change their import paths.
+import { VOICE_ID_RE } from "./voiceIdFormat.js";
+export { VOICE_ID_RE, isValidVoiceId } from "./voiceIdFormat.js";
 
 function contentTypeForFormat(fmt: string): string {
   if (fmt.startsWith("mp3_")) return "audio/mpeg";
