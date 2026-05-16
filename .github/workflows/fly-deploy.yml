@@ -108,7 +108,16 @@ jobs:
           echo "wrote $(wc -l < $RUNNER_TEMP/secrets.env) entries"
 
       - name: Setup flyctl
-        uses: superfly/flyctl-actions/setup-flyctl@master
+        # superfly/flyctl-actions/setup-flyctl@master left flyctl off
+        # the runner PATH for the next step (cmd-not-found, exit 127).
+        # Install manually + append to GITHUB_PATH so every subsequent
+        # step sees the binary.
+        run: |
+          curl -L https://fly.io/install.sh | sh
+          echo "$HOME/.fly/bin" >> "$GITHUB_PATH"
+          # Verify in this same step (uses absolute path because the
+          # PATH change only takes effect for later steps).
+          "$HOME/.fly/bin/flyctl" version
 
       - name: Ensure Fly app exists
         env:
