@@ -12,7 +12,15 @@
  * TTS latency and spend for these fixed phrases).
  */
 
-/** Role-keyed greeting audio. Each role's audio is rendered in its own voice. */
+/** Build the lookup key for greeting audio. The greeting text varies by
+ *  role and the audio rendering varies by voice, so the cache key must
+ *  be the (role, voiceId) pair. Keep this helper next to the data so the
+ *  generator and the call handler stay in lockstep. */
+export function greetingKey(role: string, voiceId: string): string {
+  return `${role}__${voiceId}`;
+}
+
+/** Greeting audio keyed by greetingKey(role, voiceId). */
 export const GREETINGS_ULAW: Record<string, string[]> = {};
 
 /** Hold message ("I'm working on that...") keyed by voice ID. */

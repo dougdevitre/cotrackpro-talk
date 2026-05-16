@@ -70,5 +70,14 @@ process.env.ELEVENLABS_CONNECT_TIMEOUT_MS ??= "2000";
 // KV backend: memory (default anyway, but be explicit).
 process.env.KV_BACKEND ??= "memory";
 
+// Inbound phone-map test fixture — used by tests/incomingHandler.test.ts
+// to exercise the /call/incoming → INBOUND_PHONE_VOICE_MAP → TwiML
+// round-trip. No other test reads this value, so setting a default is
+// safe across the suite. The voiceId here is a real ElevenLabs
+// format-valid string, so VOICE_ID_RE accepts it during map parsing.
+process.env.INBOUND_PHONE_VOICE_MAP ??= JSON.stringify({
+  "+13143948500": { voiceId: "2ydcbtd5sJZRYFMNgMVZ", role: "parent" },
+});
+
 // This module has no exports — it's purely a side-effect import.
 export {};

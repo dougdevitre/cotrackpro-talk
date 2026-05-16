@@ -68,6 +68,7 @@ import {
   HOLD_TEXT,
   ERROR_GENERIC_TEXT,
   ERROR_TOOL_TEXT,
+  greetingKey,
 } from "../audio/prerecorded.js";
 // estimateCallCost is now called from src/core/callCompletion.ts
 // (via finalizeCallCompletion). The direct import was removed as
@@ -75,6 +76,7 @@ import {
 import { SentenceBuffer } from "../core/sentenceBuffer.js";
 import { makeSentencePipedCallbacks } from "../core/streamPipeline.js";
 import { finalizeCallCompletion } from "../core/callCompletion.js";
+import { isValidVoiceId } from "../core/tts.js";
 
 // ── Dependency-injection seam for tests ────────────────────────────────────
 //
@@ -561,8 +563,26 @@ export async function handleCallStream(
 
           // Determine role from custom parameters (default: parent)
           const role = (startMsg.start.customParameters?.role as CoTrackProRole) || "parent";
+          // Optional per-call voice override set by /call/incoming via
+          // INBOUND_PHONE_VOICE_MAP. The WS handshake is not signed
+          // (Twilio signs the HTTP webhook, not the WS), so re-validate
+          // the value's shape before letting it flow into the ElevenLabs
+          // path-segment URL. When absent or malformed, createSession
+          // falls back to getVoiceId(role).
+          const rawVoiceId = startMsg.start.customParameters?.voiceId;
+          let voiceIdOverride: string | undefined;
+          if (rawVoiceId !== undefined) {
+            if (isValidVoiceId(rawVoiceId)) {
+              voiceIdOverride = rawVoiceId;
+            } else {
+              log.warn(
+                { callSid, voiceId: rawVoiceId },
+                "Discarding voiceId override — failed format check",
+              );
+            }
+          }
 
-          session = createSession(callSid, streamSid, role);
+          session = createSession(callSid, streamSid, role, voiceIdOverride);
           initMediaPrefix(streamSid);
 
           // Persist call record to DynamoDB
@@ -624,10 +644,13 @@ export async function handleCallStream(
             timestamp: Date.now(),
           });
 
-          // Connect STT and play greeting in parallel
+          // Connect STT and play greeting in parallel. Cache key
+          // includes the session's actual voice ID so override calls
+          // (INBOUND_PHONE_VOICE_MAP) hit the right pre-generated
+          // audio instead of the role's default-voice greeting.
           await Promise.all([
             sttStream.connect(),
-            playCachedOrSpeak(GREETINGS_ULAW[role], greeting),
+            playCachedOrSpeak(GREETINGS_ULAW[greetingKey(role, session.voiceId)], greeting),
           ]);
           break;
         }

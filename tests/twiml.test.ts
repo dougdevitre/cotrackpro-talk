@@ -101,6 +101,31 @@ describe("buildIncomingTwiml", () => {
     assert.ok(xml.includes("<Response>"));
     assert.ok(xml.includes("</Response>"));
   });
+
+  it("emits a voiceId Parameter when one is supplied", () => {
+    const xml = buildIncomingTwiml({
+      role: "parent",
+      callerNumber: "+15551234567",
+      voiceId: "2ydcbtd5sJZRYFMNgMVZ",
+    });
+    assert.match(xml, /<Parameter name="voiceId" value="2ydcbtd5sJZRYFMNgMVZ"/);
+  });
+
+  it("omits the voiceId Parameter when none is supplied", () => {
+    const xml = buildIncomingTwiml({ role: "parent", callerNumber: "+15551234567" });
+    assert.ok(!xml.includes('name="voiceId"'));
+  });
+
+  it("escapes special characters in voiceId", () => {
+    const xml = buildIncomingTwiml({
+      role: "parent",
+      callerNumber: "+15551234567",
+      voiceId: '"/><Hang/>',
+    });
+    // The injection must not appear as raw markup.
+    const withoutParams = xml.replace(/<Parameter[^>]*\/>/g, "");
+    assert.ok(!withoutParams.includes("<Hang"));
+  });
 });
 
 describe("buildOutboundTwiml", () => {

@@ -78,7 +78,7 @@ export const env = {
   // from the telephony voice because the in-app UI can afford a
   // warmer, longer-latency voice than a phone call needs. Set to any
   // valid ElevenLabs voice_id.
-  elevenLabsTtsVoiceId: optional("ELEVENLABS_TTS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL"),
+  elevenLabsTtsVoiceId: optional("ELEVENLABS_TTS_VOICE_ID", "2ydcbtd5sJZRYFMNgMVZ"),
   // Output format for /api/ai/tts. Browsers accept mp3 everywhere; the
   // audio/ulaw variants are telephony-only.
   elevenLabsTtsOutputFormat: optional("ELEVENLABS_TTS_OUTPUT_FORMAT", "mp3_44100_128"),
@@ -136,6 +136,14 @@ export const env = {
 
   // Voice map override (JSON string)
   voiceMapOverride: process.env.VOICE_MAP || "",
+
+  // Per-phone-number override for inbound calls. JSON object keyed by
+  // E.164 number → { voiceId, role }. Consulted by /call/incoming so
+  // a single Twilio number can be pinned to a specific voice + persona
+  // without a code change. Empty string disables the lookup (falls
+  // back to the role query param + getVoiceId(role) default).
+  // Example: {"+13143948500":{"voiceId":"2ydcbtd5sJZRYFMNgMVZ","role":"parent"}}
+  inboundPhoneVoiceMap: process.env.INBOUND_PHONE_VOICE_MAP || "",
 
   // ── KV store (cross-instance shared state: rate limits, etc.) ────────
   // Backend: "auto" (default — uses upstash if KV_URL/KV_TOKEN set, else
