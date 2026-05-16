@@ -195,6 +195,27 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: fly deploy --remote-only -a "$FLY_APP_NAME"
 
+      - name: Ensure managed certificate for the .fly.dev hostname
+        # Fly's shared-IP edge routes by SNI/Host header. If there's
+        # no managed cert on file for the hostname, the proxy returns
+        # 403 with x-deny-reason: host_not_allowed BEFORE the request
+        # ever reaches the app. The .fly.dev auto-cert flow can stall
+        # on brand-new accounts; explicit `fly certs create` triggers
+        # the Let's Encrypt issuance reliably.
+        #
+        # Idempotent: errors if the cert already exists, which we
+        # swallow with `|| true`.
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          host="$FLY_APP_NAME.fly.dev"
+          if fly certs list -a "$FLY_APP_NAME" | grep -q "$host"; then
+            echo "cert for $host already exists"
+          else
+            echo "creating cert for $host"
+            fly certs create "$host" -a "$FLY_APP_NAME" || true
+          fi
+
       - name: Resume app if suspended
         # A run of crash-restarts (e.g., bad env var) leaves the Fly
         # app in a "Suspended" state at the edge — even a fresh
