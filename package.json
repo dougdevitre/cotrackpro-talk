@@ -16,10 +16,10 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.88.0",
-    "@aws-sdk/client-dynamodb": "^3.1029.0",
-    "@aws-sdk/lib-dynamodb": "^3.1029.0",
-    "@clerk/backend": "^3.2.8",
+    "@anthropic-ai/sdk": "^0.90.0",
+    "@aws-sdk/client-dynamodb": "^3.1032.0",
+    "@aws-sdk/lib-dynamodb": "^3.1032.0",
+    "@clerk/backend": "^3.2.13",
     "@fastify/formbody": "^8.0.2",
     "@fastify/websocket": "^11.0.1",
     "dotenv": "^17.4.2",
@@ -33,6 +33,6 @@
     "@types/node": "^22.10.5",
     "@types/ws": "^8.5.13",
     "tsx": "^4.19.2",
-    "typescript": "^6.0.2"
+    "typescript": "^6.0.3"
   }
 }
