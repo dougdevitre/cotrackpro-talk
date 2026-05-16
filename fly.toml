@@ -1,0 +1,43 @@
+# fly.toml — single-host deployment for the CoTrackPro Voice Center.
+#
+# Both the HTTP webhook (/call/incoming, /health, /records, …) and the
+# Twilio Media Stream WebSocket (/call/stream) run on this one Fly
+# machine. SERVER_DOMAIN env var should match the public hostname Fly
+# assigns (default: <app>.fly.dev).
+#
+# `auto_stop_machines = false` keeps the machine always-on — voice calls
+# can't tolerate the ~30s cold start that scale-to-zero would introduce.
+
+app = "cotrackpro-talk"
+primary_region = "ord"
+
+[build]
+
+[env]
+  NODE_ENV = "production"
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  # Health check used by Fly's load balancer to decide whether to route
+  # traffic. /health is a tiny JSON endpoint; 5s timeout is generous.
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "30s"
+    method = "GET"
+    path = "/health"
+
+# Single shared-CPU machine. Plenty for a few concurrent calls. Bump
+# to performance-1x or higher (memory_mb 1024+) if you start running
+# into OOM under load — call sessions hold a few hundred KB each.
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512
