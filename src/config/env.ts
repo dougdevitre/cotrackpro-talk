@@ -78,7 +78,7 @@ export const env = {
   // from the telephony voice because the in-app UI can afford a
   // warmer, longer-latency voice than a phone call needs. Set to any
   // valid ElevenLabs voice_id.
-  elevenLabsTtsVoiceId: optional("ELEVENLABS_TTS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL"),
+  elevenLabsTtsVoiceId: optional("ELEVENLABS_TTS_VOICE_ID", "2ydcbtd5sJZRYFMNgMVZ"),
   // Output format for /api/ai/tts. Browsers accept mp3 everywhere; the
   // audio/ulaw variants are telephony-only.
   elevenLabsTtsOutputFormat: optional("ELEVENLABS_TTS_OUTPUT_FORMAT", "mp3_44100_128"),
