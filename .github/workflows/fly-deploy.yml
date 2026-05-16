@@ -132,7 +132,15 @@ jobs:
           # https://github.com/<owner>/<repo>/settings/variables/actions
           FLY_ORG_OVERRIDE: ${{ vars.FLY_ORG }}
         run: |
-          if fly apps list -j | grep -q "\"Name\":\"$FLY_APP_NAME\""; then
+          # Use jq for the existence check — grep against fly's
+          # JSON output was fragile (formatting whitespace caused
+          # it to miss an app that actually existed).
+          exists=$(fly apps list -j | jq -r --arg n "$FLY_APP_NAME" '
+            if type == "array" then any(.[]; (.Name // .name) == $n)
+            else has($n)
+            end
+          ')
+          if [ "$exists" = "true" ]; then
             echo "app $FLY_APP_NAME exists"
             exit 0
           fi
