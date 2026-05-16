@@ -6,8 +6,6 @@
 import "./helpers/setupEnv.js";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { Readable } from "node:stream";
-import type { IncomingMessage, ServerResponse } from "http";
 import {
   parseBody,
   parseQuery,
@@ -17,71 +15,7 @@ import {
   sendXml,
   requireMethod,
 } from "../src/core/httpAdapter.js";
-
-// ── Mock helpers ────────────────────────────────────────────────────────────
-
-/**
- * Build a fake IncomingMessage from a body string + headers.
- * We wrap a Readable in an object that also carries the url / method
- * / headers properties the adapter reads.
- */
-function mockRequest(opts: {
-  url?: string;
-  method?: string;
-  body?: string;
-  contentType?: string;
-}): IncomingMessage {
-  // Readable.from(string) emits the string as a single string chunk,
-  // but the httpAdapter reads chunks as Buffers. Hand-roll a Readable
-  // so we can guarantee the emitted chunks are UTF-8 Buffers.
-  const stream = new Readable({
-    read() {
-      this.push(opts.body ? Buffer.from(opts.body, "utf8") : null);
-      this.push(null);
-    },
-  }) as unknown as IncomingMessage;
-
-  (stream as unknown as {
-    url?: string;
-    method?: string;
-    headers: Record<string, string>;
-  }).url = opts.url;
-  (stream as unknown as { method?: string }).method = opts.method;
-  (stream as unknown as { headers: Record<string, string> }).headers = {
-    ...(opts.contentType ? { "content-type": opts.contentType } : {}),
-  };
-  return stream;
-}
-
-/**
- * Minimal stub of ServerResponse that captures everything the
- * adapter sends: status code, headers, and body.
- */
-function mockResponse(): {
-  res: ServerResponse;
-  getStatus: () => number | undefined;
-  getHeader: (name: string) => string | undefined;
-  getBody: () => string;
-} {
-  const headers: Record<string, string> = {};
-  let body = "";
-  const res = {
-    statusCode: undefined as number | undefined,
-    setHeader(name: string, value: string) {
-      headers[name.toLowerCase()] = value;
-    },
-    end(payload?: string) {
-      if (payload !== undefined) body += payload;
-    },
-  } as unknown as ServerResponse;
-
-  return {
-    res,
-    getStatus: () => (res as unknown as { statusCode: number | undefined }).statusCode,
-    getHeader: (name) => headers[name.toLowerCase()],
-    getBody: () => body,
-  };
-}
+import { mockRequest, mockResponse } from "./helpers/mockHttp.js";
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 

@@ -68,6 +68,7 @@ import {
   HOLD_TEXT,
   ERROR_GENERIC_TEXT,
   ERROR_TOOL_TEXT,
+  greetingKey,
 } from "../audio/prerecorded.js";
 // estimateCallCost is now called from src/core/callCompletion.ts
 // (via finalizeCallCompletion). The direct import was removed as
@@ -643,10 +644,13 @@ export async function handleCallStream(
             timestamp: Date.now(),
           });
 
-          // Connect STT and play greeting in parallel
+          // Connect STT and play greeting in parallel. Cache key
+          // includes the session's actual voice ID so override calls
+          // (INBOUND_PHONE_VOICE_MAP) hit the right pre-generated
+          // audio instead of the role's default-voice greeting.
           await Promise.all([
             sttStream.connect(),
-            playCachedOrSpeak(GREETINGS_ULAW[role], greeting),
+            playCachedOrSpeak(GREETINGS_ULAW[greetingKey(role, session.voiceId)], greeting),
           ]);
           break;
         }

@@ -23,13 +23,21 @@
  *   - A phrase text in FIXED_PHRASES changes
  *   - A voice ID in src/config/voices.ts changes
  *   - You add or remove a role
+ *   - INBOUND_PHONE_VOICE_MAP gains a new (role, voiceId) pair so the
+ *     per-phone greeting gets the same TTFB optimization as the
+ *     default-voice path
  */
 
 import "dotenv/config";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DEFAULT_VOICE_MAP } from "../src/config/voices.js";
+import { parseInboundPhoneMap } from "../src/config/inboundPhoneMap.js";
 import type { CoTrackProRole } from "../src/types/index.js";
+
+function greetingKey(role: string, voiceId: string): string {
+  return `${role}__${voiceId}`;
+}
 
 // Use process.cwd() — tsx runs this script from the project root
 const PROJECT_ROOT = process.cwd();
@@ -167,26 +175,47 @@ async function main() {
   console.log("Pre-generating fixed-phrase audio cache...");
   console.log(`Model: ${MODEL_ID}`);
 
-  // Enumerate unique voice IDs used across all roles
-  const uniqueVoiceIds = Array.from(new Set(Object.values(DEFAULT_VOICE_MAP)));
-  console.log(`Distinct voices: ${uniqueVoiceIds.length}`);
+  // Collect every (role, voiceId) pair we might need at runtime:
+  //   1. The default role→voice map.
+  //   2. Any per-phone overrides in INBOUND_PHONE_VOICE_MAP, so callers
+  //      to those numbers get the cached greeting (~200ms TTFB) instead
+  //      of the live-TTS fallback.
+  // Stored as a Map<key, {role, voiceId}> so we can dedupe trivially.
+  const pairs = new Map<string, { role: CoTrackProRole; voiceId: string }>();
+  for (const [role, voiceId] of Object.entries(DEFAULT_VOICE_MAP)) {
+    if (!voiceId) continue;
+    pairs.set(greetingKey(role, voiceId), { role: role as CoTrackProRole, voiceId });
+  }
+  const phoneMap = parseInboundPhoneMap(process.env.INBOUND_PHONE_VOICE_MAP);
+  for (const entry of Object.values(phoneMap)) {
+    pairs.set(greetingKey(entry.role, entry.voiceId), entry);
+  }
 
-  // Per-role greeting audio, keyed by role (each role → its voice's audio)
+  // Enumerate unique voice IDs across BOTH sources for hold/error phrases.
+  const uniqueVoiceIds = Array.from(
+    new Set<string>([
+      ...Object.values(DEFAULT_VOICE_MAP).filter((v): v is string => Boolean(v)),
+      ...Object.values(phoneMap).map((e) => e.voiceId),
+    ]),
+  );
+  console.log(`Greeting pairs: ${pairs.size} | Distinct voices: ${uniqueVoiceIds.length}`);
+
+  // greetingKey(role, voiceId) → ulaw frames
   const greetings: Record<string, string[]> = {};
   // Fixed phrases shared across roles, keyed by voice ID
   const holdByVoice: Record<string, string[]> = {};
   const errorGenericByVoice: Record<string, string[]> = {};
   const errorToolByVoice: Record<string, string[]> = {};
 
-  // 1. Greetings: one per role (uses role's voice)
-  for (const [role, voiceId] of Object.entries(DEFAULT_VOICE_MAP)) {
-    if (!voiceId) continue;
-    const text = GREETING_TEXTS[role as CoTrackProRole];
+  // 1. Greetings: one per (role, voiceId) pair
+  for (const { role, voiceId } of pairs.values()) {
+    const text = GREETING_TEXTS[role];
     if (!text) continue;
-    process.stdout.write(`  greeting[${role}] (${voiceId}) ... `);
+    const key = greetingKey(role, voiceId);
+    process.stdout.write(`  greeting[${key}] ... `);
     const raw = await generateAudio(text, voiceId);
-    greetings[role] = chunkToBase64Frames(raw);
-    console.log(`${raw.length} bytes, ${greetings[role].length} frames`);
+    greetings[key] = chunkToBase64Frames(raw);
+    console.log(`${raw.length} bytes, ${greetings[key].length} frames`);
   }
 
   // 2. Hold + error phrases: one per unique voice
@@ -221,7 +250,12 @@ async function main() {
  * 20ms of audio per frame) ready to be placed in Twilio media messages.
  */
 
-/** Role-keyed greeting audio. Each role's audio is rendered in its own voice. */
+/** Build the lookup key for greeting audio. Mirrors src/audio/prerecorded.ts. */
+export function greetingKey(role: string, voiceId: string): string {
+  return \`\${role}__\${voiceId}\`;
+}
+
+/** Greeting audio keyed by greetingKey(role, voiceId). */
 export const GREETINGS_ULAW: Record<string, string[]> = ${JSON.stringify(greetings, null, 2)};
 
 /** Hold message ("I'm working on that...") keyed by voice ID. */
