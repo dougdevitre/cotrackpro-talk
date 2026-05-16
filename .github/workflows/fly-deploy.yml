@@ -5,7 +5,7 @@ name: Deploy to Fly
 # source) and pushes them into Fly's secrets store on every run, then
 # deploys. Idempotent — running twice with no changes is a no-op.
 #
-# Required repository secrets:
+# Required secrets (in the "production" GitHub Environment):
 #   FLY_API_TOKEN          — from https://fly.io/user/personal_access_tokens
 #   AWS_ACCESS_KEY_ID      — IAM user with ssm:GetParameter on /cotrackpro/prod/*
 #   AWS_SECRET_ACCESS_KEY  — paired with the access key above
@@ -38,6 +38,12 @@ jobs:
     name: Build + deploy to Fly
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Scope the job to the "production" GitHub Environment so it can
+    # read the FLY_API_TOKEN / AWS_* secrets stored there. Without
+    # this, ${{ secrets.X }} only reads repository-scope secrets and
+    # falls through empty for environment-scoped ones, which is what
+    # caused the early "Configure AWS credentials" failures.
+    environment: production
     env:
       FLY_APP_NAME: ${{ vars.FLY_APP_NAME || 'cotrackpro-talk' }}
       AWS_REGION:   ${{ vars.AWS_REGION || 'us-east-1' }}
@@ -45,6 +51,23 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Verify required secrets
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          missing=()
+          [ -z "$FLY_API_TOKEN" ]         && missing+=("FLY_API_TOKEN")
+          [ -z "$AWS_ACCESS_KEY_ID" ]     && missing+=("AWS_ACCESS_KEY_ID")
+          [ -z "$AWS_SECRET_ACCESS_KEY" ] && missing+=("AWS_SECRET_ACCESS_KEY")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing secret(s) in 'production' environment: ${missing[*]}"
+            echo "::error::Add them at https://github.com/${{ github.repository }}/settings/environments"
+            exit 1
+          fi
+          echo "All required secrets present."
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
