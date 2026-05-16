@@ -86,7 +86,7 @@ jobs:
             "twilio/auth_token:TWILIO_AUTH_TOKEN"
             "twilio/phone_number:TWILIO_PHONE_NUMBER"
             "elevenlabs/api_key:ELEVENLABS_API_KEY"
-            "anthropic/api_key:ANTHROPIC_API_KEY"
+            "ai/anthropic/api_key:ANTHROPIC_API_KEY"
             "voice/inbound_phone_map:INBOUND_PHONE_VOICE_MAP"
           )
           : > "$RUNNER_TEMP/secrets.env"
