@@ -259,6 +259,8 @@ Set `INBOUND_PHONE_VOICE_MAP` to a JSON object keyed by E.164 phone number to pi
 
 Canonical source is AWS SSM at `/cotrackpro/prod/voice/inbound_phone_map`; `scripts/sync-ssm-to-vercel.sh` mirrors that value (and the other secrets) to Vercel env vars. To point a Twilio number at this app's webhook programmatically, run `npm run configure:twilio -- +13143948500` (uses `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN` + `API_DOMAIN`).
 
+Go-live runbook: [`docs/GO_LIVE-inbound-voice.md`](docs/GO_LIVE-inbound-voice.md).
+
 ## Production Deployment
 
 ### Security checklist

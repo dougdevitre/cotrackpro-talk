@@ -4,6 +4,11 @@ Incident playbook for CoTrackPro Voice Center. Reach for this when
 something is on fire. Each section has the same shape: **symptom →
 likely cause → verification → fix**.
 
+> For deploy-time procedures (provisioning a new phone number, rolling
+> a voice ID, SSM → Vercel/Fly sync), see
+> [`GO_LIVE-inbound-voice.md`](./GO_LIVE-inbound-voice.md). This file
+> stays focused on incidents.
+
 ## Audience
 
 The on-call engineer at 2am. Assume they know the codebase casually

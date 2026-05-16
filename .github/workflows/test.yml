@@ -55,3 +55,10 @@ jobs:
         # node:test via tsx (see tests/). No env vars required —
         # tests/helpers/setupEnv.ts stubs the mandatory vars at import.
         run: npm test
+
+      - name: Lint config (INBOUND_PHONE_VOICE_MAP)
+        # Strict validator over the env-set JSON. INBOUND_PHONE_VOICE_MAP
+        # is unset in CI so this is a no-op on most PRs (exits 0 on
+        # empty input). The step still runs to catch regressions in
+        # scripts/lint-config.ts itself and the pure validator chain.
+        run: npm run lint:config
