@@ -162,6 +162,10 @@ export interface CallSession {
   createdAt: number;
   lastActivityMs: number;
   mcpSessionId?: string;
+  /** Clerk subject resolved from the caller's number (when linked).
+   *  Threaded from the inbound TwiML so downstream MCP/artifact calls
+   *  can attribute work to the right account. */
+  subject?: string;
   /** Running cost metrics aggregated across the call lifetime. */
   costMetrics: CallCostMetrics;
 }
@@ -244,6 +248,11 @@ export interface CallRecord {
   direction: "inbound" | "outbound";
   /** Caller phone number (masked for PII: "+1***4567") */
   callerNumber: string;
+  /** Clerk subject the caller's number resolved to via the hub resolve
+   *  edge, when the number is linked to an account. Absent for
+   *  anonymous/unlinked callers. Used to attribute voice-created
+   *  artifacts. */
+  subject?: string;
   /** ISO 8601 timestamp when the call started */
   startedAt: string;
   /** ISO 8601 timestamp when the call ended (set on completion) */

@@ -116,6 +116,31 @@ describe("buildIncomingTwiml", () => {
     assert.ok(!xml.includes('name="voiceId"'));
   });
 
+  it("emits a subject Parameter when one is supplied", () => {
+    const xml = buildIncomingTwiml({
+      role: "parent",
+      callerNumber: "+15551234567",
+      subject: "user_2abcDEF",
+    });
+    assert.match(xml, /<Parameter name="subject" value="user_2abcDEF"/);
+  });
+
+  it("omits the subject Parameter for anonymous (unlinked) callers", () => {
+    const xml = buildIncomingTwiml({ role: "parent", callerNumber: "+15551234567" });
+    assert.ok(!xml.includes('name="subject"'));
+  });
+
+  it("escapes special characters in subject", () => {
+    const xml = buildIncomingTwiml({
+      role: "parent",
+      callerNumber: "+15551234567",
+      subject: '"/><Reject/>',
+    });
+    assert.ok(!xml.includes('value=""/'), "raw quote break-out must be escaped");
+    const withoutParams = xml.replace(/<Parameter[^>]*\/>/g, "");
+    assert.ok(!withoutParams.includes("<Reject"));
+  });
+
   it("escapes special characters in voiceId", () => {
     const xml = buildIncomingTwiml({
       role: "parent",

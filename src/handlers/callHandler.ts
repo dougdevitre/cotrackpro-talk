@@ -582,7 +582,14 @@ export async function handleCallStream(
             }
           }
 
-          session = createSession(callSid, streamSid, role, voiceIdOverride);
+          // Clerk subject resolved by /call/incoming from the caller's
+          // number (when their number is linked). Threaded onto the
+          // session + call record for artifact attribution. The WS
+          // handshake isn't signed, but subject carries no authority on
+          // its own here — it's an attribution tag, not an auth token.
+          const subject = startMsg.start.customParameters?.subject || undefined;
+
+          session = createSession(callSid, streamSid, role, voiceIdOverride, subject);
           initMediaPrefix(streamSid);
 
           // Persist call record to DynamoDB
@@ -593,6 +600,7 @@ export async function handleCallStream(
             role,
             direction,
             callerNumber: maskPhoneNumber(callerNumber),
+            subject,
             startedAt: new Date().toISOString(),
             status: "active",
             turnCount: 0,

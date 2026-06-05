@@ -23,6 +23,7 @@ import {
   validateTwilioSignature,
 } from "../core/twiml.js";
 import { lookupInboundPhone } from "../config/inboundPhoneMap.js";
+import { resolvePhoneToSubject } from "../core/resolvePhone.js";
 
 const log = logger.child({ handler: "twiml" });
 
@@ -74,7 +75,13 @@ export function registerTwimlRoutes(app: FastifyInstance): void {
         "Inbound phone map match",
       );
     }
-    const twiml = buildIncomingTwiml({ role, callerNumber: from, voiceId });
+    // Resolve caller → Clerk subject for artifact attribution. Fail-open
+    // (see api/call/incoming.ts and core/resolvePhone.ts).
+    const subject = (await resolvePhoneToSubject(from)) ?? undefined;
+    if (subject) {
+      log.info({ callSid }, "Inbound caller resolved to a linked account");
+    }
+    const twiml = buildIncomingTwiml({ role, callerNumber: from, voiceId, subject });
 
     reply.type("text/xml").send(twiml);
   });

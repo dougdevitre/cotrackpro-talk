@@ -48,6 +48,11 @@ process.env.LOG_LEVEL ??= "silent";
 // Individual tests can re-import env or stub these per-test.
 process.env.OUTBOUND_RATE_LIMIT_PER_MIN ??= "1000";
 process.env.OUTBOUND_RATE_LIMIT_PER_HOUR ??= "10000";
+// SMS-send rate limits. High enough not to interfere; tests/sms.test.ts
+// reads env.smsRateLimitPerMin to know how many to flood when it
+// exercises the 429 trip.
+process.env.SMS_RATE_LIMIT_PER_MIN ??= "1000";
+process.env.SMS_RATE_LIMIT_PER_HOUR ??= "10000";
 // Records rate limits — set to a low-ish value for the tripping test
 // in tests/records.test.ts (which floods until 429). 150 is enough
 // to cover legitimate test traffic but low enough to trip in <200

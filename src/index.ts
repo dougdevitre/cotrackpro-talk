@@ -17,6 +17,7 @@ import { logger } from "./utils/logger.js";
 import { peakSessionCount, sessionCount } from "./utils/sessions.js";
 import { registerTwimlRoutes } from "./handlers/twiml.js";
 import { registerOutboundRoutes } from "./handlers/outbound.js";
+import { registerSmsRoutes } from "./handlers/sms.js";
 import { registerRecordRoutes } from "./handlers/records.js";
 import { registerAiRoutes } from "./handlers/ai.js";
 import { handleCallStream } from "./handlers/callHandler.js";
@@ -46,6 +47,7 @@ async function main() {
   // ── HTTP Routes ───────────────────────────────────────────────────────
   registerTwimlRoutes(app);
   registerOutboundRoutes(app);
+  registerSmsRoutes(app);
   registerRecordRoutes(app);
   registerAiRoutes(app);
 

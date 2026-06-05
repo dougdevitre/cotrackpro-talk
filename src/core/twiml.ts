@@ -126,18 +126,25 @@ export function buildIncomingTwiml(params: {
   role: string;
   callerNumber: string;
   voiceId?: string;
+  /** Clerk subject resolved from the caller's number, when linked.
+   *  Threaded to the WS session for artifact attribution. Omitted for
+   *  anonymous/unlinked callers. */
+  subject?: string;
 }): string {
   const role = normalizeRole(params.role);
   const wsUrl = `wss://${env.wsDomain}/call/stream`;
   const voiceIdParam = params.voiceId
     ? `\n      <Parameter name="voiceId" value="${escapeXmlAttr(params.voiceId)}" />`
     : "";
+  const subjectParam = params.subject
+    ? `\n      <Parameter name="subject" value="${escapeXmlAttr(params.subject)}" />`
+    : "";
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
     <Stream url="${escapeXmlAttr(wsUrl)}">
       <Parameter name="role" value="${escapeXmlAttr(role)}" />
-      <Parameter name="callerNumber" value="${escapeXmlAttr(params.callerNumber)}" />${voiceIdParam}
+      <Parameter name="callerNumber" value="${escapeXmlAttr(params.callerNumber)}" />${voiceIdParam}${subjectParam}
     </Stream>
   </Connect>
 </Response>`;

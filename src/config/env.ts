@@ -100,11 +100,24 @@ export const env = {
   // CoTrackPro MCP
   cotrackproMcpUrl: optional("COTRACKPRO_MCP_URL", "https://mcp.cotrackpro.com/sse"),
 
+  // CoTrackPro hub — base URL of the connector that hosts the trusted
+  // resolve edge (POST /internal/v1/resolve-phone). The voice surface
+  // calls it on inbound calls to map the caller's number → Clerk subject
+  // so voice-created artifacts get attributed. Empty string ⇒ the
+  // resolve call is a no-op that returns null (anonymous/unlinked flow),
+  // mirroring the hub-side talk-client's "no-op until base URL set"
+  // pattern. The bearer is the shared OUTBOUND_API_KEY (see below).
+  hubBaseUrl: process.env.HUB_BASE_URL || "",
+
   // Clerk (federated auth from CoTrackPro sub-apps)
   clerkPublishableKey: process.env.CLERK_PUBLISHABLE_KEY || "",
   clerkSecretKey: process.env.CLERK_SECRET_KEY || "",
 
-  // Outbound API auth (set to require Bearer token on /call/outbound)
+  // Outbound API auth. Set to require a Bearer token on /call/outbound
+  // AND /api/sms/send (the OTP-delivery endpoint the hub calls into),
+  // and used as the bearer the voice surface presents to the hub's
+  // resolve edge. This is the shared talk bearer; canonical source is
+  // SSM /cotrackpro/<stage>/talk/outbound_api_key.
   outboundApiKey: process.env.OUTBOUND_API_KEY || "",
 
   // Twilio webhook signature validation (set to "true" to enable)
@@ -177,6 +190,12 @@ export const env = {
     optional("RECORDS_RATE_LIMIT_PER_HOUR", "2000"),
     10,
   ),
+  // Fixed-window rate limit on POST /api/sms/send. Independent budget
+  // from /call/outbound so OTP-delivery volume and outbound-dial volume
+  // don't cannibalize each other. Protects against a leaked talk bearer
+  // amplifying into unbounded Twilio SMS spend.
+  smsRateLimitPerMin: parseInt(optional("SMS_RATE_LIMIT_PER_MIN", "30"), 10),
+  smsRateLimitPerHour: parseInt(optional("SMS_RATE_LIMIT_PER_HOUR", "500"), 10),
   // Per-user budget on POST /api/ai/complete — shared across every sub-app
   // a Clerk user touches, so one compromised sub-app can't amplify abuse.
   aiRateLimitPerMin: parseInt(optional("AI_RATE_LIMIT_PER_MIN", "20"), 10),

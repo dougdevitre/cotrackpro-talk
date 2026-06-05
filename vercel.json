@@ -21,6 +21,7 @@
     { "source": "/call/incoming", "destination": "/api/call/incoming" },
     { "source": "/call/status", "destination": "/api/call/status" },
     { "source": "/call/outbound", "destination": "/api/call/outbound" },
+    { "source": "/api/sms/send", "destination": "/api/sms/send" },
     { "source": "/health", "destination": "/api/health" },
     { "source": "/dashboard", "destination": "/api/dashboard" },
     { "source": "/records", "destination": "/api/records" },

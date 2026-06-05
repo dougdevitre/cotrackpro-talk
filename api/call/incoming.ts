@@ -21,6 +21,7 @@ import {
   validateTwilioSignature,
 } from "../../src/core/twiml.js";
 import { lookupInboundPhone } from "../../src/config/inboundPhoneMap.js";
+import { resolvePhoneToSubject } from "../../src/core/resolvePhone.js";
 import { logger } from "../../src/utils/logger.js";
 import {
   parseBody,
@@ -71,6 +72,14 @@ export default async function handler(
       "Inbound phone map match",
     );
   }
-  const twiml = buildIncomingTwiml({ role, callerNumber: from, voiceId });
+  // Resolve the caller's number → Clerk subject so voice-created
+  // artifacts get attributed. Fail-open: a null subject (unlinked
+  // number, hub unreachable, or HUB_BASE_URL unset) means the call
+  // proceeds anonymously.
+  const subject = (await resolvePhoneToSubject(from)) ?? undefined;
+  if (subject) {
+    logger.info({ callSid }, "Inbound caller resolved to a linked account");
+  }
+  const twiml = buildIncomingTwiml({ role, callerNumber: from, voiceId, subject });
   sendXml(res, 200, twiml);
 }
