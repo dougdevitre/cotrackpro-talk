@@ -28,7 +28,9 @@ registered after the CTA is fixed.
 
 ### 1. Publish the consent pages (web app: talk.cotrackpro.com — NOT this repo)
 This repo is the voice/SMS API edge only; the user-facing pages live in the web
-app. Publish, at public/no-auth URLs:
+app. **Ready-to-publish copy with every required clause is in
+`docs/sms-privacy-policy.md` and `docs/sms-terms.md`** — fill the
+`{{PLACEHOLDERS}}` and paste into the web app. Publish, at public/no-auth URLs:
 
 - **Privacy Policy** including the SMS clause MNOs require: *"Mobile information
   will not be shared with third parties or affiliates for marketing or
