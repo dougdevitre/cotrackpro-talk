@@ -11,8 +11,19 @@ import twilio from "twilio";
 import { env } from "../config/env.js";
 import { logger } from "../utils/logger.js";
 import { normalizeRole } from "./enumValidation.js";
+import { resolvePhone, sendAuthLink } from "../services/hub.js";
+import { maskPhoneNumber } from "../services/dynamo.js";
 
 const log = logger.child({ core: "twiml" });
+
+/**
+ * The line the assistant speaks when an unlinked caller has just been
+ * sent a one-time sign-in link. Surfaced into the call via a TwiML
+ * Stream <Parameter> and spoken by the call handler after the greeting.
+ */
+export const AUTH_LINK_NOTICE =
+  "By the way — I just texted you a sign-in link. Tap it, sign in, " +
+  "then call me back and I'll know it's you.";
 
 /** Escape a string for safe use in an XML attribute value. */
 export function escapeXmlAttr(str: string): string {
@@ -126,21 +137,86 @@ export function buildIncomingTwiml(params: {
   role: string;
   callerNumber: string;
   voiceId?: string;
+  /** Clerk subject when the caller is a recognized signed-in user. */
+  subject?: string;
+  /** Line for the assistant to speak when a sign-in link was just sent. */
+  authNotice?: string;
 }): string {
   const role = normalizeRole(params.role);
   const wsUrl = `wss://${env.wsDomain}/call/stream`;
   const voiceIdParam = params.voiceId
     ? `\n      <Parameter name="voiceId" value="${escapeXmlAttr(params.voiceId)}" />`
     : "";
+  const subjectParam = params.subject
+    ? `\n      <Parameter name="subject" value="${escapeXmlAttr(params.subject)}" />`
+    : "";
+  const authNoticeParam = params.authNotice
+    ? `\n      <Parameter name="authNotice" value="${escapeXmlAttr(params.authNotice)}" />`
+    : "";
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
     <Stream url="${escapeXmlAttr(wsUrl)}">
       <Parameter name="role" value="${escapeXmlAttr(role)}" />
-      <Parameter name="callerNumber" value="${escapeXmlAttr(params.callerNumber)}" />${voiceIdParam}
+      <Parameter name="callerNumber" value="${escapeXmlAttr(params.callerNumber)}" />${voiceIdParam}${subjectParam}${authNoticeParam}
     </Stream>
   </Connect>
 </Response>`;
+}
+
+/**
+ * Recognize an inbound caller against the hub, and — if the caller isn't
+ * linked yet — ask the hub to text them a one-time sign-in link.
+ *
+ * Returns the bits the TwiML needs:
+ *   - `subject`    : set when the caller is a recognized signed-in user.
+ *   - `authNotice` : set when we successfully triggered a sign-in SMS, so
+ *                    the call handler can tell the caller to check their
+ *                    phone.
+ *
+ * FAILS OPEN by design. The hub being down, slow, or unconfigured must
+ * never block an inbound call: an unrecognized caller still reaches
+ * crisis resources + anonymous help (that path is never gated behind
+ * sign-in). So every non-`linked` / non-`sent` outcome simply returns
+ * empty extras and the call proceeds anonymously.
+ *
+ * `from` must be the caller's E.164 number ("From"). When it's unknown
+ * (e.g. blocked caller ID) we skip the hub entirely.
+ */
+export async function resolveInboundCaller(
+  from: string | undefined,
+): Promise<{ subject?: string; authNotice?: string }> {
+  if (!from || from === "unknown" || !env.hubBaseUrl) return {};
+
+  const masked = maskPhoneNumber(from);
+  const resolved = await resolvePhone(from);
+
+  if (resolved.status === "linked") {
+    log.info({ from: masked }, "Inbound caller recognized (linked)");
+    return { subject: resolved.subject };
+  }
+
+  if (resolved.status !== "not_linked") {
+    // unauthorized / not_configured / invalid / error → proceed anonymous.
+    log.warn(
+      { from: masked, status: resolved.status },
+      "resolve-phone non-success — proceeding as anonymous caller",
+    );
+    return {};
+  }
+
+  // Caller isn't linked → offer a sign-in link via the hub. Best-effort.
+  const link = await sendAuthLink(from);
+  if (link.status === "sent") {
+    log.info({ from: masked }, "Sign-in link sent to unlinked caller");
+    return { authNotice: AUTH_LINK_NOTICE };
+  }
+
+  log.warn(
+    { from: masked, status: link.status },
+    "send-auth-link non-success — proceeding as anonymous caller",
+  );
+  return {};
 }
 
 /**

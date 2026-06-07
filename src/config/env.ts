@@ -104,8 +104,36 @@ export const env = {
   clerkPublishableKey: process.env.CLERK_PUBLISHABLE_KEY || "",
   clerkSecretKey: process.env.CLERK_SECRET_KEY || "",
 
-  // Outbound API auth (set to require Bearer token on /call/outbound)
+  // Outbound API auth (set to require Bearer token on /call/outbound).
+  //
+  // This SAME token is the shared hub↔talk bearer (SSM
+  // /cotrackpro/<stage>/talk/outbound_api_key). The talk edge PRESENTS
+  // it on calls TO the hub (resolve-phone, send-auth-link) and VERIFIES
+  // it (constant-time) on calls FROM the hub (/api/sms/send,
+  // /call/outbound). One secret, both directions — see src/services/hub.ts
+  // and src/core/sms.ts.
   outboundApiKey: process.env.OUTBOUND_API_KEY || "",
+
+  // ── CoTrackPro hub (identity / OTP / token minting) ──────────────────
+  // Base URL of the hub's Lambda Function URL / custom domain, per stage.
+  // The talk edge calls {hubBaseUrl}/internal/v1/resolve-phone and
+  // .../send-auth-link to recognize callers and text unlinked callers a
+  // one-time sign-in link. Empty disables hub integration (the inbound
+  // loop then treats every caller as anonymous — crisis resources +
+  // anonymous help still work). No trailing slash.
+  hubBaseUrl: (process.env.HUB_BASE_URL || "").replace(/\/+$/, ""),
+  // Timeout (ms) on each hub HTTP call. Kept short so a slow/unreachable
+  // hub can't stall Twilio's inbound webhook (Twilio drops the call if
+  // the webhook doesn't return promptly).
+  hubTimeoutMs: parseInt(optional("HUB_TIMEOUT_MS", "4000"), 10),
+
+  // ── SMS send (hub → talk: POST /api/sms/send) ────────────────────────
+  // Fixed-window rate limit on the inbound SMS-send endpoint. The hub
+  // composes the body and authenticates with the shared bearer, but we
+  // still cap throughput as defense-in-depth against a leaked key
+  // amplifying into Twilio SMS spend.
+  smsRateLimitPerMin: parseInt(optional("SMS_RATE_LIMIT_PER_MIN", "30"), 10),
+  smsRateLimitPerHour: parseInt(optional("SMS_RATE_LIMIT_PER_HOUR", "500"), 10),
 
   // Twilio webhook signature validation (set to "true" to enable)
   validateTwilioSignature: optional("VALIDATE_TWILIO_SIGNATURE", "false"),

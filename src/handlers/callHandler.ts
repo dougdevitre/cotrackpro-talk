@@ -582,8 +582,18 @@ export async function handleCallStream(
             }
           }
 
-          session = createSession(callSid, streamSid, role, voiceIdOverride);
+          // Clerk subject set by /call/incoming when the hub recognized
+          // this caller as a signed-in user (resolve-phone). Anonymous
+          // callers have none. Stored on the session for artifact
+          // attribution + per-call tier reads.
+          const subject = startMsg.start.customParameters?.subject || undefined;
+          // Spoken notice set by /call/incoming when an unlinked caller
+          // was just texted a sign-in link.
+          const authNotice = startMsg.start.customParameters?.authNotice;
+
+          session = createSession(callSid, streamSid, role, voiceIdOverride, subject);
           initMediaPrefix(streamSid);
+          if (subject) log.info({ callSid }, "Call attributed to signed-in subject");
 
           // Persist call record to DynamoDB
           const callerNumber = startMsg.start.customParameters?.callerNumber ?? "unknown";
@@ -652,6 +662,19 @@ export async function handleCallStream(
             sttStream.connect(),
             playCachedOrSpeak(GREETINGS_ULAW[greetingKey(role, session.voiceId)], greeting),
           ]);
+
+          // If the hub just texted this (unlinked) caller a sign-in link,
+          // tell them to check their phone. Spoken via live TTS after the
+          // greeting — this is the rare unlinked path, so the extra TTS
+          // cost is acceptable. The notice text is composed in core/twiml.ts.
+          if (authNotice) {
+            session.conversationHistory.push({
+              role: "assistant",
+              content: authNotice,
+              timestamp: Date.now(),
+            });
+            await speak(authNotice);
+          }
           break;
         }
 
