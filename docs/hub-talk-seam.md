@@ -103,7 +103,8 @@ registry secrets in the Vercel dashboard by hand.
 
 ## Compliance gating (before any PRODUCTION send)
 
-- A2P 10DLC brand + campaign on the number (trial/verified number for testing).
+- A2P 10DLC brand + campaign on the number — see `docs/twilio-a2p-setup.md`
+  (setup + campaign-rejection remediation). Trial/verified number for testing.
 - STOP/HELP/START handling, suppression list, quiet hours, frequency caps.
 - Separate explicit VOICE consent before outbound calls.
 

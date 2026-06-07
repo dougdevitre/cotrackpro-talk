@@ -205,6 +205,7 @@ vercel deploy --prod && fly deploy -a cotrackpro-ws
 | `npm run configure:twilio -- +<E164>`     | set Twilio voice webhook on a number                |
 | `npm run show:twilio -- +<E164>`          | read back current Twilio config for a number        |
 | `npm run show:a2p`                        | A2P 10DLC / TrustHub status (brand + campaign + pool)|
+| (SMS go-live / A2P fix)                    | see `docs/twilio-a2p-setup.md`                      |
 | `npm run generate-audio`                  | regenerate the prerecorded greeting/hold/error cache|
 | `./scripts/sync-ssm-to-vercel.sh prod`    | mirror the 7 registry secrets → Vercel production   |
 | `./scripts/sync-ssm-to-vercel.sh dev`     | mirror the 7 registry secrets → Vercel preview      |
