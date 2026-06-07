@@ -40,7 +40,8 @@ URLs already entered on the campaign, public/no-auth:
 - **https://cotrackpro.com/privacy** ← `docs/sms-privacy-policy.md`
 - **https://cotrackpro.com/terms** ← `docs/sms-terms.md`
 - The **signup page at talk.cotrackpro.com** must also be publicly reachable with
-  the SMS consent checkbox, whose label links to the two pages above.
+  the SMS consent checkbox, whose label links to the two pages above. The exact
+  checkbox/disclosure copy is in `docs/sms-optin-disclosure.md`.
 
 Required clauses (all already in the copy above):
 
