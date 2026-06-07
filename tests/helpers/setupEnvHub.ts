@@ -21,4 +21,8 @@ process.env.OUTBOUND_API_KEY = "test-shared-bearer";
 // Keep the hub timeout short so any accidental real fetch fails fast.
 process.env.HUB_TIMEOUT_MS ??= "1000";
 
+// A2P Messaging Service SID — set so SMS-send tests exercise the
+// brand/campaign-attributed routing path (not a bare from-number).
+process.env.TWILIO_MESSAGING_SERVICE_SID ??= "MGtest0000000000000000000000000000";
+
 export {};

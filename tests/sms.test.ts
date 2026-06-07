@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import {
   authorizeInboundSms,
   sendSms,
+  buildSmsCreateParams,
   _setSmsSenderForTests,
   type SmsSender,
 } from "../src/core/sms.js";
@@ -46,6 +47,17 @@ describe("authorizeInboundSms", () => {
 
   it("accepts the shared bearer (returns null)", () => {
     assert.equal(authorizeInboundSms("Bearer test-shared-bearer"), null);
+  });
+});
+
+describe("buildSmsCreateParams — A2P attribution", () => {
+  it("sends through the Messaging Service SID, not a bare from-number", () => {
+    // setupEnvHub sets TWILIO_MESSAGING_SERVICE_SID.
+    const params = buildSmsCreateParams("+15551230123", "hi");
+    assert.equal(params.messagingServiceSid, "MGtest0000000000000000000000000000");
+    assert.equal(params.from, undefined);
+    assert.equal(params.to, "+15551230123");
+    assert.equal(params.body, "hi");
   });
 });
 

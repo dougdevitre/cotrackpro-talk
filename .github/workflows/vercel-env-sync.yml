@@ -1,0 +1,97 @@
+name: Sync SSM → Vercel env
+
+# Mirror CoTrackPro talk config from AWS SSM Parameter Store (the single
+# source of truth) into the Vercel project's environment. The talk app
+# runs on Vercel and cannot read SSM at runtime, so this bridges the two
+# at deploy time via scripts/sync-ssm-to-vercel.sh. Idempotent.
+#
+# Required secrets (in the "production" GitHub Environment):
+#   AWS_ACCESS_KEY_ID      — IAM user with, on /cotrackpro/<stage>/talk/*,
+#   AWS_SECRET_ACCESS_KEY    /twilio/*, /elevenlabs/* (and the rest of the
+#                            stage namespace): ssm:GetParameter,
+#                            ssm:GetParametersByPath, kms:Decrypt
+#   VERCEL_TOKEN           — https://vercel.com/account/tokens
+#
+# Required repository variables (read by the Vercel CLI to target the
+# right project non-interactively):
+#   VERCEL_ORG_ID
+#   VERCEL_PROJECT_ID
+#
+# Optional repository variables:
+#   AWS_REGION             — defaults to "us-east-1"
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "SSM stage namespace (/cotrackpro/<stage>)"
+        required: true
+        default: "prod"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/sync-ssm-to-vercel.sh"
+      - ".github/workflows/vercel-env-sync.yml"
+
+concurrency:
+  group: vercel-env-sync-${{ github.event.inputs.stage || 'prod' }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Mirror SSM into Vercel env
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Scope to the "production" GitHub Environment so the AWS_* and
+    # VERCEL_TOKEN secrets stored there resolve (matches fly-deploy.yml).
+    environment: production
+    env:
+      STAGE: ${{ github.event.inputs.stage || 'prod' }}
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Verify required secrets
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          missing=()
+          [ -z "$AWS_ACCESS_KEY_ID" ]     && missing+=("AWS_ACCESS_KEY_ID")
+          [ -z "$AWS_SECRET_ACCESS_KEY" ] && missing+=("AWS_SECRET_ACCESS_KEY")
+          [ -z "$VERCEL_TOKEN" ]          && missing+=("VERCEL_TOKEN")
+          [ -z "$VERCEL_ORG_ID" ]         && missing+=("VERCEL_ORG_ID (repo variable)")
+          [ -z "$VERCEL_PROJECT_ID" ]     && missing+=("VERCEL_PROJECT_ID (repo variable)")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing config in 'production' environment: ${missing[*]}"
+            echo "::error::Secrets: https://github.com/${{ github.repository }}/settings/environments"
+            echo "::error::Variables: https://github.com/${{ github.repository }}/settings/variables/actions"
+            exit 1
+          fi
+          echo "All required secrets/variables present."
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      - name: Sync SSM → Vercel env
+        # VERCEL_TOKEN / VERCEL_ORG_ID / VERCEL_PROJECT_ID are read from
+        # the job env above; the stage drives both the SSM namespace and
+        # the target Vercel environment (prod → production, else preview).
+        run: |
+          ./scripts/sync-ssm-to-vercel.sh \
+            --stage "$STAGE" \
+            --region "$AWS_REGION"
+
+      - name: Done
+        run: echo "::notice title=Synced::SSM /cotrackpro/$STAGE → Vercel env"

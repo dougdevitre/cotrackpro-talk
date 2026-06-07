@@ -52,16 +52,33 @@ function twilioClient(): ReturnType<typeof twilio> {
   return _client;
 }
 
+/**
+ * Build the `messages.create` params. Outbound SMS is attributed to the
+ * approved A2P 10DLC brand/campaign by sending through the Messaging
+ * Service SID — NOT a bare from-number — whenever one is configured.
+ * The from-number is only used as a local/test fallback; production
+ * enforces the Messaging Service via `smsRoutingConfigError` below.
+ *
+ * Exported for unit testing the routing decision without hitting Twilio.
+ */
+export function buildSmsCreateParams(
+  to: string,
+  body: string,
+): { to: string; body: string; messagingServiceSid?: string; from?: string } {
+  if (env.twilioMessagingServiceSid) {
+    return { to, body, messagingServiceSid: env.twilioMessagingServiceSid };
+  }
+  return { to, body, from: env.twilioPhoneNumber };
+}
+
 let _senderImpl: SmsSender | null = null;
 function sender(): SmsSender {
   return (
     _senderImpl ??
     (async ({ to, body }) => {
-      const msg = await twilioClient().messages.create({
-        to,
-        from: env.twilioPhoneNumber,
-        body,
-      });
+      const msg = await twilioClient().messages.create(
+        buildSmsCreateParams(to, body),
+      );
       return { sid: msg.sid };
     })
   );
@@ -233,6 +250,25 @@ export async function sendSms(body: SmsRequest | undefined): Promise<SmsResult> 
     // way; don't let retries burn rate-limit budget re-validating.
     await storeIdempotent("sms", dedupeHash, result);
     return result;
+  }
+
+  // A2P enforcement: in production we refuse to send without a Messaging
+  // Service SID, so a misconfigured deploy can't silently fall back to a
+  // bare from-number and send unattributed (campaign-violating) traffic.
+  // Not cached — this is an operational misconfig, not a property of the
+  // request, and should clear the moment the SID is set.
+  if (!env.twilioMessagingServiceSid && env.nodeEnv === "production") {
+    log.error(
+      "TWILIO_MESSAGING_SERVICE_SID is unset in production — refusing to send unattributed SMS.",
+    );
+    return {
+      ok: false,
+      status: 500,
+      body: {
+        error: "sms_misconfigured",
+        details: "TWILIO_MESSAGING_SERVICE_SID is required in production",
+      },
+    };
   }
 
   const to = body.to;

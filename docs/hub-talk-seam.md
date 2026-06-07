@@ -9,9 +9,11 @@ and lets an unlinked caller be texted a one-time sign-in link.
 ## Trust model
 
 A **single shared bearer secret** authenticates hub↔talk in **both
-directions**. It lives in SSM at `/cotrackpro/<stage>/talk/outbound_api_key`
-and is surfaced as `OUTBOUND_API_KEY` (`env.outboundApiKey`) — the same
-token already used by `/call/outbound` and `/records/*`.
+directions**. It lives in SSM at `/cotrackpro/<stage>/talk/outbound_api_key`,
+is mirrored into Vercel as `TALK_OUTBOUND_API_KEY` by
+`scripts/sync-ssm-to-vercel.sh` (legacy `OUTBOUND_API_KEY` still honored
+as a fallback), and is surfaced as `env.outboundApiKey` — the same token
+used by `/call/outbound` and `/records/*`.
 
 - **Talk → Hub:** we PRESENT it (`Authorization: Bearer …`).
 - **Hub → Talk:** we VERIFY it constant-time via `bearerMatches`.
@@ -41,9 +43,15 @@ composes the entire SMS body and sends it back through our
 Body `{ to, body, dedupeKey }`. Verifies the shared bearer, validates the
 destination (E.164 + country allow-list via `validateDialable`),
 rate-limits (KV), is **idempotent on `dedupeKey`**, and sends `body`
-verbatim through the Twilio number. Responds `2xx { sid }`.
-`body` is never logged (it can contain a sign-in link); phone numbers are
-masked.
+verbatim. Responds `2xx { sid }`. `body` is never logged (it can contain
+a sign-in link); phone numbers are masked.
+
+**A2P attribution:** the message is sent **through
+`TWILIO_MESSAGING_SERVICE_SID`** (the A2P 10DLC-registered Messaging
+Service), not a bare from-number, so every send is attributed to the
+approved brand/campaign. Production **fails closed** (`500
+sms_misconfigured`) if the service SID is unset; non-prod falls back to
+`TWILIO_PHONE_NUMBER` for local testing.
 
 ### `POST /api/call/outbound` — partial / deferred
 
@@ -75,12 +83,19 @@ bound and the next `resolve-phone` returns `{ subject }`.
 
 ## Configuration
 
-| Env | Purpose |
-|-----|---------|
-| `OUTBOUND_API_KEY` | Shared hub↔talk bearer (SSM `/cotrackpro/<stage>/talk/outbound_api_key`) |
-| `HUB_BASE_URL` | Hub Function URL / custom domain (no trailing slash). Empty = hub disabled (all callers anonymous) |
-| `HUB_TIMEOUT_MS` | Per-call timeout (default 4000) |
-| `SMS_RATE_LIMIT_PER_MIN` / `SMS_RATE_LIMIT_PER_HOUR` | Limits on `/api/sms/send` (default 30 / 500) |
+All runtime config is mirrored from AWS SSM (single source of truth) into
+Vercel env at deploy time by `scripts/sync-ssm-to-vercel.sh` (CI:
+`.github/workflows/vercel-env-sync.yml`).
+
+| Vercel env | SSM source (`/cotrackpro/<stage>/…`) | Purpose |
+|-----|-----|---------|
+| `TALK_OUTBOUND_API_KEY` | `talk/outbound_api_key` | Shared hub↔talk bearer (legacy `OUTBOUND_API_KEY` fallback) |
+| `TWILIO_MESSAGING_SERVICE_SID` | `twilio/messaging_service_sid` | A2P Messaging Service SMS is sent through (required in prod) |
+| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_PHONE_NUMBER` | `twilio/*` | Twilio REST + from-number |
+| `ELEVENLABS_API_KEY` / `ELEVENLABS_VOICE_ID_DOUG` | `elevenlabs/*` | TTS/STT key + named "Doug" voice |
+| `HUB_BASE_URL` | (per stage env) | Hub Function URL / custom domain (no trailing slash). Empty = hub disabled (all callers anonymous) |
+| `HUB_TIMEOUT_MS` | — | Per-call timeout (default 4000) |
+| `SMS_RATE_LIMIT_PER_MIN` / `SMS_RATE_LIMIT_PER_HOUR` | — | Limits on `/api/sms/send` (default 30 / 500) |
 
 ## Compliance gating (before any PRODUCTION send)
 

@@ -70,6 +70,13 @@ export const env = {
   twilioAccountSid: required("TWILIO_ACCOUNT_SID"),
   twilioAuthToken: required("TWILIO_AUTH_TOKEN"),
   twilioPhoneNumber: required("TWILIO_PHONE_NUMBER"),
+  // A2P 10DLC Messaging Service SID. Outbound SMS MUST be sent through
+  // this (not a bare from-number) so every message is attributed to the
+  // approved A2P brand/campaign. Mirrored from SSM
+  // /cotrackpro/<stage>/twilio/messaging_service_sid. When unset, SMS
+  // sends fall back to the from-number — allowed for local/test only;
+  // src/core/sms.ts fails closed on a missing service SID in production.
+  twilioMessagingServiceSid: process.env.TWILIO_MESSAGING_SERVICE_SID || "",
 
   // ElevenLabs
   elevenLabsApiKey: required("ELEVENLABS_API_KEY"),
@@ -79,6 +86,10 @@ export const env = {
   // warmer, longer-latency voice than a phone call needs. Set to any
   // valid ElevenLabs voice_id.
   elevenLabsTtsVoiceId: optional("ELEVENLABS_TTS_VOICE_ID", "2ydcbtd5sJZRYFMNgMVZ"),
+  // Named ElevenLabs voice for the "Doug" persona. Mirrored from SSM
+  // /cotrackpro/<stage>/elevenlabs/voice_id_doug. Optional — callers that
+  // need it read env.elevenLabsVoiceIdDoug; empty when not provisioned.
+  elevenLabsVoiceIdDoug: process.env.ELEVENLABS_VOICE_ID_DOUG || "",
   // Output format for /api/ai/tts. Browsers accept mp3 everywhere; the
   // audio/ulaw variants are telephony-only.
   elevenLabsTtsOutputFormat: optional("ELEVENLABS_TTS_OUTPUT_FORMAT", "mp3_44100_128"),
@@ -112,7 +123,13 @@ export const env = {
   // it (constant-time) on calls FROM the hub (/api/sms/send,
   // /call/outbound). One secret, both directions — see src/services/hub.ts
   // and src/core/sms.ts.
-  outboundApiKey: process.env.OUTBOUND_API_KEY || "",
+  //
+  // Canonical Vercel name is TALK_OUTBOUND_API_KEY (what
+  // scripts/sync-ssm-to-vercel.sh mirrors the SSM value into). The legacy
+  // OUTBOUND_API_KEY name is still honored as a fallback so existing
+  // deploys keep working through the rename.
+  outboundApiKey:
+    process.env.TALK_OUTBOUND_API_KEY || process.env.OUTBOUND_API_KEY || "",
 
   // ── CoTrackPro hub (identity / OTP / token minting) ──────────────────
   // Base URL of the hub's Lambda Function URL / custom domain, per stage.
