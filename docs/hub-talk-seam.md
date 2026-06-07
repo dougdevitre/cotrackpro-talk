@@ -83,19 +83,23 @@ bound and the next `resolve-phone` returns `{ subject }`.
 
 ## Configuration
 
-All runtime config is mirrored from AWS SSM (single source of truth) into
-Vercel env at deploy time by `scripts/sync-ssm-to-vercel.sh` (CI:
-`.github/workflows/vercel-env-sync.yml`).
+The **shared registry secrets** (owned in the hub repo
+`docs/ops/ssm-parameters.md`) are mirrored from AWS SSM — the single
+source of truth — into Vercel env at deploy time by
+`scripts/sync-ssm-to-vercel.sh` (CI: `.github/workflows/vercel-env-sync.yml`).
+That script handles exactly the first seven rows below; the remaining
+rows are per-environment app config set by other means. Never set the
+registry secrets in the Vercel dashboard by hand.
 
-| Vercel env | SSM source (`/cotrackpro/<stage>/…`) | Purpose |
-|-----|-----|---------|
-| `TALK_OUTBOUND_API_KEY` | `talk/outbound_api_key` | Shared hub↔talk bearer (legacy `OUTBOUND_API_KEY` fallback) |
-| `TWILIO_MESSAGING_SERVICE_SID` | `twilio/messaging_service_sid` | A2P Messaging Service SMS is sent through (required in prod) |
-| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_PHONE_NUMBER` | `twilio/*` | Twilio REST + from-number |
-| `ELEVENLABS_API_KEY` / `ELEVENLABS_VOICE_ID_DOUG` | `elevenlabs/*` | TTS/STT key + named "Doug" voice |
-| `HUB_BASE_URL` | (per stage env) | Hub Function URL / custom domain (no trailing slash). Empty = hub disabled (all callers anonymous) |
-| `HUB_TIMEOUT_MS` | — | Per-call timeout (default 4000) |
-| `SMS_RATE_LIMIT_PER_MIN` / `SMS_RATE_LIMIT_PER_HOUR` | — | Limits on `/api/sms/send` (default 30 / 500) |
+| Vercel env | SSM source (`/cotrackpro/<stage>/…`) | Mirrored by script? | Purpose |
+|-----|-----|-----|---------|
+| `TALK_OUTBOUND_API_KEY` | `talk/outbound_api_key` | yes | Shared hub↔talk bearer (legacy `OUTBOUND_API_KEY` fallback) |
+| `TWILIO_MESSAGING_SERVICE_SID` | `twilio/messaging_service_sid` | yes | A2P Messaging Service SMS is sent through (required in prod) |
+| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_PHONE_NUMBER` | `twilio/*` | yes | Twilio REST + from-number |
+| `ELEVENLABS_API_KEY` / `ELEVENLABS_VOICE_ID_DOUG` | `elevenlabs/*` | yes | TTS/STT key + named "Doug" voice |
+| `HUB_BASE_URL` | (per stage env) | no | Hub Function URL / custom domain (no trailing slash). Empty = hub disabled (all callers anonymous) |
+| `HUB_TIMEOUT_MS` | — | no | Per-call timeout (default 4000) |
+| `SMS_RATE_LIMIT_PER_MIN` / `SMS_RATE_LIMIT_PER_HOUR` | — | no | Limits on `/api/sms/send` (default 30 / 500) |
 
 ## Compliance gating (before any PRODUCTION send)
 

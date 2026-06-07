@@ -24,8 +24,10 @@ on:
   workflow_dispatch:
     inputs:
       stage:
-        description: "SSM stage namespace (/cotrackpro/<stage>)"
+        description: "Stage to sync (drives /cotrackpro/<stage> and the Vercel target)"
         required: true
+        type: choice
+        options: ["prod", "test"]
         default: "prod"
   push:
     branches: [main]
@@ -85,13 +87,11 @@ jobs:
         run: npm install -g vercel@latest
 
       - name: Sync SSM → Vercel env
-        # VERCEL_TOKEN / VERCEL_ORG_ID / VERCEL_PROJECT_ID are read from
-        # the job env above; the stage drives both the SSM namespace and
-        # the target Vercel environment (prod → production, else preview).
-        run: |
-          ./scripts/sync-ssm-to-vercel.sh \
-            --stage "$STAGE" \
-            --region "$AWS_REGION"
+        # STAGE is the positional arg: prod → Vercel production, test →
+        # preview. VERCEL_TOKEN / VERCEL_ORG_ID / VERCEL_PROJECT_ID and
+        # AWS_REGION are read from the job env above. Runs BEFORE any Vercel
+        # build so each deploy reconciles env to SSM.
+        run: ./scripts/sync-ssm-to-vercel.sh "$STAGE"
 
       - name: Done
         run: echo "::notice title=Synced::SSM /cotrackpro/$STAGE → Vercel env"
