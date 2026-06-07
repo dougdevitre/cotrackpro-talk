@@ -263,7 +263,7 @@ Go-live runbook: [`docs/GO_LIVE-inbound-voice.md`](docs/GO_LIVE-inbound-voice.md
 
 ## Production Deployment
 
-> **Shared secrets are owned in AWS SSM** (see the hub repo `docs/ops/ssm-parameters.md`); `scripts/sync-ssm-to-vercel.sh` mirrors them into this app's Vercel env at deploy time. **Never set these in the Vercel dashboard by hand.** Run it per target before the Vercel build — `./scripts/sync-ssm-to-vercel.sh prod` (→ Vercel `production`) or `./scripts/sync-ssm-to-vercel.sh test` (→ `preview`). CI: `.github/workflows/vercel-env-sync.yml`.
+> **Shared secrets are owned in AWS SSM** (see the hub repo `docs/ops/ssm-parameters.md`); `scripts/sync-ssm-to-vercel.sh` mirrors them into this app's Vercel env at deploy time. **Never set these in the Vercel dashboard by hand.** Run it per target before the Vercel build — `./scripts/sync-ssm-to-vercel.sh prod` (→ Vercel `production`) or `./scripts/sync-ssm-to-vercel.sh dev` (→ `preview`). CI: `.github/workflows/vercel-env-sync.yml`.
 
 ### Security checklist
 

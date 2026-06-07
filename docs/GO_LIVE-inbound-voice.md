@@ -89,7 +89,7 @@ Two kinds of config land in the runtimes:
 
   ```bash
   ./scripts/sync-ssm-to-vercel.sh prod    # → Vercel production
-  ./scripts/sync-ssm-to-vercel.sh test    # → Vercel preview
+  ./scripts/sync-ssm-to-vercel.sh dev     # → Vercel preview
   ```
 
 - **`INBOUND_PHONE_VOICE_MAP`** (this doc's subject) is NOT a registry
@@ -204,6 +204,7 @@ vercel deploy --prod && fly deploy -a cotrackpro-ws
 | `npm run list:phones -- --json`           | print the active phone map (JSON)                   |
 | `npm run configure:twilio -- +<E164>`     | set Twilio voice webhook on a number                |
 | `npm run show:twilio -- +<E164>`          | read back current Twilio config for a number        |
+| `npm run show:a2p`                        | A2P 10DLC / TrustHub status (brand + campaign + pool)|
 | `npm run generate-audio`                  | regenerate the prerecorded greeting/hold/error cache|
 | `./scripts/sync-ssm-to-vercel.sh prod`    | mirror the 7 registry secrets → Vercel production   |
-| `./scripts/sync-ssm-to-vercel.sh test`    | mirror the 7 registry secrets → Vercel preview      |
+| `./scripts/sync-ssm-to-vercel.sh dev`     | mirror the 7 registry secrets → Vercel preview      |

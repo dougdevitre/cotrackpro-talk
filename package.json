@@ -13,6 +13,7 @@
     "generate-audio": "tsx scripts/generate-prerecorded.ts",
     "configure:twilio": "tsx scripts/configure-twilio-number.ts",
     "show:twilio": "tsx scripts/show-twilio-number.ts",
+    "show:a2p": "tsx scripts/show-a2p-status.ts",
     "list:phones": "tsx scripts/list-phone-mappings.ts",
     "lint:config": "tsx scripts/lint-config.ts",
     "preflight": "npm run typecheck && npm test && npm run lint:config"

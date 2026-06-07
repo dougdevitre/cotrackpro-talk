@@ -11,7 +11,9 @@
 # Never set these in the Vercel dashboard by hand.
 #
 # USAGE:
-#   ./scripts/sync-ssm-to-vercel.sh [STAGE]     # STAGE ∈ {prod, test}, default prod
+#   ./scripts/sync-ssm-to-vercel.sh [STAGE]     # STAGE ∈ {prod, dev}, default prod
+#   prod → Vercel "production"  ·  dev → Vercel "preview"
+#   (The non-prod namespace in SSM is /cotrackpro/dev/, not "test".)
 #
 # ENV:
 #   AWS credentials  — read-only on the namespaces below (+ kms:Decrypt)
@@ -39,9 +41,9 @@ STAGE="${1:-prod}"
 # mapping is trivial to change.
 case "$STAGE" in
   prod) TARGET="production" ;;
-  test) TARGET="preview" ;;
+  dev)  TARGET="preview" ;;
   *)
-    echo "ERROR: STAGE must be 'prod' or 'test' (got: '${STAGE}')" >&2
+    echo "ERROR: STAGE must be 'prod' or 'dev' (got: '${STAGE}')" >&2
     exit 2
     ;;
 esac

@@ -27,7 +27,7 @@ on:
         description: "Stage to sync (drives /cotrackpro/<stage> and the Vercel target)"
         required: true
         type: choice
-        options: ["prod", "test"]
+        options: ["prod", "dev"]
         default: "prod"
   push:
     branches: [main]
@@ -87,7 +87,7 @@ jobs:
         run: npm install -g vercel@latest
 
       - name: Sync SSM → Vercel env
-        # STAGE is the positional arg: prod → Vercel production, test →
+        # STAGE is the positional arg: prod → Vercel production, dev →
         # preview. VERCEL_TOKEN / VERCEL_ORG_ID / VERCEL_PROJECT_ID and
         # AWS_REGION are read from the job env above. Runs BEFORE any Vercel
         # build so each deploy reconciles env to SSM.
