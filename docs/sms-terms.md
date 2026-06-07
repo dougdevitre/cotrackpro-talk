@@ -1,45 +1,51 @@
 # SMS / Messaging Terms & Conditions
 
-> **Publishing note:** Ready-to-publish copy for the web app
-> (talk.cotrackpro.com), **not** served by this repo. Publish at a **public,
-> no-auth URL** and put that URL in the A2P campaign's **Terms & Conditions URL**
-> field (see `docs/twilio-a2p-setup.md`). Fill the `{{PLACEHOLDERS}}` first. The
-> numbered clauses are the ones TCR/MNO vetting checks for — keep them all.
+> **Publishing note:** This is the copy to publish at **https://cotrackpro.com/terms**
+> (the URL entered in the A2P campaign's *Terms and Conditions URL* field). It
+> lives in the web app, **not** this repo. Publish at a **public, no-auth URL**.
+> Twilio specifically checks that this page includes the program name,
+> description, message/data rates, message frequency, support contact, and
+> **HELP and STOP in bold** — all present below.
 
-_Last updated: {{EFFECTIVE_DATE}}_
+_Last updated: June 7, 2026_
 
 These Messaging Terms & Conditions govern the CoTrackPro Talk SMS program.
 
 ## 1. Program (brand) name
 
-The program is operated by **CoTrackPro** under the brand **CoTrackPro Talk**.
+The program is operated by **CoTrackPro LLC** under the brand **CoTrackPro Talk**.
 
 ## 2. Description / message types
 
 By opting in, you agree to receive **account servicing and transactional text
-messages** from CoTrackPro Talk, including **sign-in / authentication links,
-account and security notifications, and case- or service-related messages** you
-have requested. This is an account-based (conversational + transactional)
-program, not a marketing program.
+messages** from CoTrackPro Talk, including **verification/sign-in codes,
+missed-call notifications, scheduled-call reminders, transcript-ready
+notifications, and account and security alerts** related to your use of the
+service. This is an account-based (conversational + transactional) program, not a
+marketing program.
 
 ## 3. How you opt in (consent)
 
-You provide consent to receive messages by {{OPT_IN_METHOD — e.g., "checking the
-SMS consent box during account sign-up at talk.cotrackpro.com and submitting the
-form," or "entering and verifying your mobile number in your account settings"}}.
+You provide consent to receive messages in either of these ways:
+
+- **During account signup at https://talk.cotrackpro.com**, by entering your
+  mobile number and checking the box agreeing to receive SMS notifications
+  related to calls, reminders, transcripts, and account security; or
+- By **texting START or SUBSCRIBE to (314) 394-8500**.
 
 > Consent to receive text messages is **not a condition of any purchase**.
 
-After you opt in, you'll receive a confirmation message such as:
+After you opt in, you'll receive a confirmation message:
 
-> _CoTrackPro Talk: You're opted in to recurring account messages (sign-in links
-> & notifications). Msg frequency varies. Msg & data rates may apply. Reply HELP
-> for help, STOP to cancel._
+> _CoTrackPro Talk: You're now subscribed to receive secure call updates and
+> notifications. Msg frequency varies. Msg & data rates may apply. Reply HELP for
+> help or STOP to unsubscribe._
 
 ## 4. Message frequency
 
 **Message frequency varies** based on your account activity and the actions you
-take (for example, each time you request a sign-in link).
+take (for example, each verification code you request or each call you schedule
+or miss).
 
 ## 5. Cost
 
@@ -56,8 +62,8 @@ take (for example, each time you request a sign-in link).
 
 ## 7. Help (HELP)
 
-> **For help, reply HELP** to any message, or contact us at {{SUPPORT_EMAIL}} /
-> {{SUPPORT_PHONE}}.
+> **For help, reply HELP** to any message, or contact us at admin@cotrackpro.com
+> or +1 (314) 394-8500.
 
 ## 8. Carriers and delivery
 
@@ -73,7 +79,7 @@ change and is not guaranteed.
 ## 10. Privacy
 
 Your information is handled in accordance with our Privacy Policy:
-{{PRIVACY_POLICY_URL}}.
+https://cotrackpro.com/privacy.
 
 > Mobile information will not be shared with third parties or affiliates for
 > marketing or promotional purposes.
@@ -86,8 +92,6 @@ acceptance.
 
 ## 12. Contact
 
-CoTrackPro — CoTrackPro Talk
-{{BUSINESS_LEGAL_NAME_AND_ADDRESS}}
-Email: {{SUPPORT_EMAIL}}
-Phone: {{SUPPORT_PHONE}}
-Messaging number: +1 (314) 394-8500
+CoTrackPro LLC — CoTrackPro Talk
+Email: admin@cotrackpro.com
+Phone / messaging number: +1 (314) 394-8500

@@ -1,21 +1,17 @@
 # Privacy Policy — SMS / Mobile Messaging
 
-> **Publishing note:** This is ready-to-publish copy for the web app
-> (talk.cotrackpro.com), **not** content served by this repo. Paste it into the
-> public Privacy Policy page (or a clearly-linked `#sms` section of your existing
-> one). It must be reachable at a **public, no-auth URL**, and that URL goes in
-> the A2P campaign's **Privacy Policy URL** field (see
-> `docs/twilio-a2p-setup.md`).
->
-> Fill the `{{PLACEHOLDERS}}` before publishing. The **bold sentences below are
-> the exact clauses MNOs / TCR look for — do not paraphrase them away.**
+> **Publishing note:** This is the copy to publish at **https://cotrackpro.com/privacy**
+> (the URL entered in the A2P campaign's *Privacy Policy URL* field). It lives in
+> the web app, **not** this repo. The page must be reachable at a **public,
+> no-auth URL** for the campaign CTA review to pass. The **bold sentences are the
+> exact clauses MNOs / TCR look for — keep them verbatim.**
 
-_Last updated: {{EFFECTIVE_DATE}}_
+_Last updated: June 7, 2026_
 
-CoTrackPro ("CoTrackPro," "we," "us," or "our") operates CoTrackPro Talk, a
+CoTrackPro LLC ("CoTrackPro," "we," "us," or "our") operates CoTrackPro Talk, a
 documentation and communication service for families navigating high-conflict
-separation. This policy explains how we handle information in connection with our
-SMS/text-messaging program.
+separation, and their attorneys and professionals. This policy explains how we
+handle information in connection with our SMS/text-messaging program.
 
 ## The short version (what MNOs require us to say)
 
@@ -31,25 +27,26 @@ When you use our SMS program we collect:
 
 - Your **mobile phone number**.
 - Your **consent record** (when and how you opted in to messaging).
-- **Message content and metadata** you exchange with the service (e.g., the
-  text of authentication links and the messages you send/receive through
-  CoTrackPro Talk, timestamps, and delivery status).
+- **Message content and metadata** related to the messages we send you —
+  verification codes, missed-call notifications, scheduled-call reminders,
+  transcript-ready notifications, and account/security alerts — including
+  timestamps and delivery status.
 
-We collect this information so we can deliver the messages you've requested —
-for example, sign-in / authentication links and account- or case-related
-notifications.
+We collect this information so we can deliver the messages you've requested as
+part of using CoTrackPro Talk.
 
 ## How we use mobile information
 
 We use your mobile number and consent record **only** to operate the messaging
-program you opted into: sending sign-in links, account notifications, and related
-service messages. We do not sell this information.
+program you opted into: sending verification codes, call notifications and
+reminders, transcript notifications, and account/security alerts. We do not sell
+this information.
 
 > **Mobile opt-in data and consent are never shared with third parties or
 > affiliates for marketing or promotional purposes.**
 
 We may share information **only** with service providers (subcontractors) who
-help us deliver the messages — for example, our SMS delivery provider (Twilio) —
+help us deliver the messages — for example, our SMS delivery provider, Twilio —
 and only to the extent needed to provide the service. These providers are bound
 to use the information solely for that purpose.
 
@@ -62,8 +59,8 @@ to use the information solely for that purpose.
 
 > **You can opt out of receiving text messages at any time by replying STOP to
 > any message. You will receive one confirmation message and then no further
-> messages. For help, reply HELP** or contact us at {{SUPPORT_EMAIL}} /
-> {{SUPPORT_PHONE}}.
+> messages. For help, reply HELP** or contact us at admin@cotrackpro.com or
+> +1 (314) 394-8500.
 
 ## Data retention and security
 
@@ -75,7 +72,7 @@ administrative, technical, and physical safeguards to protect this information.
 ## Your rights
 
 You may request access to, correction of, or deletion of the personal
-information we hold about you by contacting {{SUPPORT_EMAIL}}. Deleting your
+information we hold about you by contacting admin@cotrackpro.com. Deleting your
 mobile number or revoking consent (by replying STOP) will end the messaging
 program for that number.
 
@@ -92,7 +89,6 @@ will be posted on this page.
 
 ## Contact
 
-CoTrackPro
-{{BUSINESS_LEGAL_NAME_AND_ADDRESS}}
-Email: {{SUPPORT_EMAIL}}
-Phone: {{SUPPORT_PHONE}}
+CoTrackPro LLC
+Email: admin@cotrackpro.com
+Phone: +1 (314) 394-8500

@@ -21,16 +21,28 @@ under `/cotrackpro/<stage>/twilio/*` and mirrored to Vercel by
 The Brand is approved; the **Campaign was rejected at TCR** for *"issues
 verifying the Call to Action (CTA)"* — its submission left **Privacy Policy URL**
 and **Terms & Conditions URL** blank, and the opt-in flow wasn't publicly
-verifiable. Rejected TCR campaigns can't be edited, so a **new campaign** must be
-registered after the CTA is fixed.
+verifiable. Twilio's **Edit A2P Campaign Details** modal lets you **fix and
+resubmit this same campaign** (a **$15 vetting fee**, campaign SID unchanged) —
+preferred, since SSM needs no change if it passes. If resubmission keeps failing,
+register a new campaign instead.
+
+**Field-by-field values to paste into the form are in
+`docs/twilio-campaign-form-answers.md`.**
 
 ## Fix, in order
 
-### 1. Publish the consent pages (web app: talk.cotrackpro.com — NOT this repo)
+### 1. Publish the consent pages (web app — NOT this repo)
 This repo is the voice/SMS API edge only; the user-facing pages live in the web
-app. **Ready-to-publish copy with every required clause is in
-`docs/sms-privacy-policy.md` and `docs/sms-terms.md`** — fill the
-`{{PLACEHOLDERS}}` and paste into the web app. Publish, at public/no-auth URLs:
+app. **Ready-to-publish copy (fully filled, no placeholders) is in
+`docs/sms-privacy-policy.md` and `docs/sms-terms.md`.** Publish them at the exact
+URLs already entered on the campaign, public/no-auth:
+
+- **https://cotrackpro.com/privacy** ← `docs/sms-privacy-policy.md`
+- **https://cotrackpro.com/terms** ← `docs/sms-terms.md`
+- The **signup page at talk.cotrackpro.com** must also be publicly reachable with
+  the SMS consent checkbox, whose label links to the two pages above.
+
+Required clauses (all already in the copy above):
 
 - **Privacy Policy** including the SMS clause MNOs require: *"Mobile information
   will not be shared with third parties or affiliates for marketing or
@@ -42,20 +54,24 @@ app. **Ready-to-publish copy with every required clause is in
   text that links to the Privacy Policy and Terms. (If it must sit behind auth,
   keep screenshots ready — but a public URL is what passes review.)
 
-### 2. Register a NEW campaign (Twilio → Messaging → Regulatory Compliance → Campaigns)
-- Under approved Brand `BN800…`, use case **Low Volume Mixed**.
-- **Fill the Privacy Policy URL and Terms & Conditions URL** (step 1 pages) — this
-  is the field that was blank and caused the rejection.
-- Keep the existing sample messages. Write the "how end users consent" / CTA
-  description so it matches the now-public opt-in page. The opt-in confirmation
-  message should name the brand + "recurring" + "Msg & data rates may apply" +
-  STOP/HELP (Twilio manages STOP/HELP keywords by default).
-- Attach the campaign to Messaging Service `MG6bc2…`; confirm `+13143948500` is in
-  the sender pool. Submit; wait for **Campaign status = VERIFIED**.
-- If it rejects again: open a Twilio support ticket with the brand SID, the failed
-  campaign SID, and the public CTA/Privacy/Terms URLs.
+### 2. Fix & resubmit the campaign (Twilio → Messaging → Regulatory Compliance → Campaigns → Fix Campaign / Edit)
+**Use `docs/twilio-campaign-form-answers.md` for the exact field values.** Summary:
+- **Privacy Policy URL → `https://cotrackpro.com/privacy`**, **Terms URL →
+  `https://cotrackpro.com/terms`** — the blank fields that caused the rejection.
+- **Drop sample message #5** (the "added you to their contacts" invite) — it
+  implies messaging a non-consented recipient. Keep samples #1–#4.
+- Rewrite "how end users consent" so it names the **public** signup checkbox at
+  talk.cotrackpro.com (linking to the two pages) + the START/SUBSCRIBE keyword —
+  no "screenshots on request," no vague paths.
+- Leave Twilio-managed STOP/HELP/START defaults as-is.
+- Check the **$15 vetting fee** box → **Update**. Campaign SID is unchanged; wait
+  for **Campaign status = VERIFIED**.
+- If it rejects again: open a Twilio support ticket with the brand SID, the
+  campaign SID, and the live CTA/Privacy/Terms URLs.
 
-### 3. Record the new campaign SID in SSM
+### 3. Record the campaign SID in SSM
+Resubmitting via the Edit modal keeps the **same SID** (`CM906d…`), so SSM
+likely needs **no change**. Only run this if you registered a *new* campaign:
 ```bash
 aws ssm put-parameter --region us-east-1 --overwrite \
   --name /cotrackpro/prod/twilio/campaign_sid --value 'CM…new-approved…'
