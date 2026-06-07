@@ -19,6 +19,7 @@ import {
   buildIncomingTwiml,
   logIncomingCall,
   logStatusCallback,
+  resolveInboundCaller,
   signatureValidationEnabled,
   validateTwilioSignature,
 } from "../core/twiml.js";
@@ -74,7 +75,17 @@ export function registerTwimlRoutes(app: FastifyInstance): void {
         "Inbound phone map match",
       );
     }
-    const twiml = buildIncomingTwiml({ role, callerNumber: from, voiceId });
+    // Recognize the caller against the hub (and text an unlinked caller a
+    // sign-in link). Fails open — see resolveInboundCaller.
+    const { subject, authNotice } = await resolveInboundCaller(from);
+
+    const twiml = buildIncomingTwiml({
+      role,
+      callerNumber: from,
+      voiceId,
+      subject,
+      authNotice,
+    });
 
     reply.type("text/xml").send(twiml);
   });

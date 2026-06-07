@@ -70,6 +70,13 @@ export const env = {
   twilioAccountSid: required("TWILIO_ACCOUNT_SID"),
   twilioAuthToken: required("TWILIO_AUTH_TOKEN"),
   twilioPhoneNumber: required("TWILIO_PHONE_NUMBER"),
+  // A2P 10DLC Messaging Service SID. Outbound SMS MUST be sent through
+  // this (not a bare from-number) so every message is attributed to the
+  // approved A2P brand/campaign. Mirrored from SSM
+  // /cotrackpro/<stage>/twilio/messaging_service_sid. When unset, SMS
+  // sends fall back to the from-number — allowed for local/test only;
+  // src/core/sms.ts fails closed on a missing service SID in production.
+  twilioMessagingServiceSid: process.env.TWILIO_MESSAGING_SERVICE_SID || "",
 
   // ElevenLabs
   elevenLabsApiKey: required("ELEVENLABS_API_KEY"),
@@ -79,6 +86,10 @@ export const env = {
   // warmer, longer-latency voice than a phone call needs. Set to any
   // valid ElevenLabs voice_id.
   elevenLabsTtsVoiceId: optional("ELEVENLABS_TTS_VOICE_ID", "2ydcbtd5sJZRYFMNgMVZ"),
+  // Named ElevenLabs voice for the "Doug" persona. Mirrored from SSM
+  // /cotrackpro/<stage>/elevenlabs/voice_id_doug. Optional — callers that
+  // need it read env.elevenLabsVoiceIdDoug; empty when not provisioned.
+  elevenLabsVoiceIdDoug: process.env.ELEVENLABS_VOICE_ID_DOUG || "",
   // Output format for /api/ai/tts. Browsers accept mp3 everywhere; the
   // audio/ulaw variants are telephony-only.
   elevenLabsTtsOutputFormat: optional("ELEVENLABS_TTS_OUTPUT_FORMAT", "mp3_44100_128"),
@@ -104,8 +115,42 @@ export const env = {
   clerkPublishableKey: process.env.CLERK_PUBLISHABLE_KEY || "",
   clerkSecretKey: process.env.CLERK_SECRET_KEY || "",
 
-  // Outbound API auth (set to require Bearer token on /call/outbound)
-  outboundApiKey: process.env.OUTBOUND_API_KEY || "",
+  // Outbound API auth (set to require Bearer token on /call/outbound).
+  //
+  // This SAME token is the shared hub↔talk bearer (SSM
+  // /cotrackpro/<stage>/talk/outbound_api_key). The talk edge PRESENTS
+  // it on calls TO the hub (resolve-phone, send-auth-link) and VERIFIES
+  // it (constant-time) on calls FROM the hub (/api/sms/send,
+  // /call/outbound). One secret, both directions — see src/services/hub.ts
+  // and src/core/sms.ts.
+  //
+  // Canonical Vercel name is TALK_OUTBOUND_API_KEY (what
+  // scripts/sync-ssm-to-vercel.sh mirrors the SSM value into). The legacy
+  // OUTBOUND_API_KEY name is still honored as a fallback so existing
+  // deploys keep working through the rename.
+  outboundApiKey:
+    process.env.TALK_OUTBOUND_API_KEY || process.env.OUTBOUND_API_KEY || "",
+
+  // ── CoTrackPro hub (identity / OTP / token minting) ──────────────────
+  // Base URL of the hub's Lambda Function URL / custom domain, per stage.
+  // The talk edge calls {hubBaseUrl}/internal/v1/resolve-phone and
+  // .../send-auth-link to recognize callers and text unlinked callers a
+  // one-time sign-in link. Empty disables hub integration (the inbound
+  // loop then treats every caller as anonymous — crisis resources +
+  // anonymous help still work). No trailing slash.
+  hubBaseUrl: (process.env.HUB_BASE_URL || "").replace(/\/+$/, ""),
+  // Timeout (ms) on each hub HTTP call. Kept short so a slow/unreachable
+  // hub can't stall Twilio's inbound webhook (Twilio drops the call if
+  // the webhook doesn't return promptly).
+  hubTimeoutMs: parseInt(optional("HUB_TIMEOUT_MS", "4000"), 10),
+
+  // ── SMS send (hub → talk: POST /api/sms/send) ────────────────────────
+  // Fixed-window rate limit on the inbound SMS-send endpoint. The hub
+  // composes the body and authenticates with the shared bearer, but we
+  // still cap throughput as defense-in-depth against a leaked key
+  // amplifying into Twilio SMS spend.
+  smsRateLimitPerMin: parseInt(optional("SMS_RATE_LIMIT_PER_MIN", "30"), 10),
+  smsRateLimitPerHour: parseInt(optional("SMS_RATE_LIMIT_PER_HOUR", "500"), 10),
 
   // Twilio webhook signature validation (set to "true" to enable)
   validateTwilioSignature: optional("VALIDATE_TWILIO_SIGNATURE", "false"),

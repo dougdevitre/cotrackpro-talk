@@ -80,6 +80,7 @@ export function createSession(
   streamSid: string,
   role: CoTrackProRole = "parent",
   voiceIdOverride?: string,
+  subject?: string,
 ): CallSession {
   const now = Date.now();
   const session: CallSession = {
@@ -87,6 +88,7 @@ export function createSession(
     streamSid,
     role,
     voiceId: voiceIdOverride ?? getVoiceId(role),
+    subject,
     conversationHistory: [],
     isProcessing: false,
     audioBuffer: [],

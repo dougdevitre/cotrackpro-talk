@@ -162,6 +162,13 @@ export interface CallSession {
   createdAt: number;
   lastActivityMs: number;
   mcpSessionId?: string;
+  /**
+   * Clerk subject ("clerk:...") when the inbound caller was recognized
+   * as a signed-in user by the hub (resolve-phone). Undefined for
+   * anonymous callers. Used to attribute artifacts to the caller and to
+   * unlock paid tier tools (tier is read from the hub per call).
+   */
+  subject?: string;
   /** Running cost metrics aggregated across the call lifetime. */
   costMetrics: CallCostMetrics;
 }

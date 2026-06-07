@@ -55,6 +55,15 @@ process.env.OUTBOUND_RATE_LIMIT_PER_HOUR ??= "10000";
 process.env.RECORDS_RATE_LIMIT_PER_MIN ??= "150";
 process.env.RECORDS_RATE_LIMIT_PER_HOUR ??= "10000";
 
+// SMS-send rate limits — high enough not to interfere with most tests.
+process.env.SMS_RATE_LIMIT_PER_MIN ??= "1000";
+process.env.SMS_RATE_LIMIT_PER_HOUR ??= "10000";
+
+// Hub integration is left UNSET by default so resolveInboundCaller
+// short-circuits to "anonymous" and the existing /call/incoming tests
+// see no subject/authNotice params. Tests that exercise the hub seam
+// set HUB_BASE_URL explicitly and inject a fetch stub.
+
 // E-2 session cap. Set high enough that no tests trip it unless
 // they explicitly test the cap behavior.
 process.env.MAX_CONCURRENT_SESSIONS ??= "1000";

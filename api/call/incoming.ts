@@ -18,6 +18,7 @@ import {
   buildIncomingTwiml,
   buildSignedWebhookUrl,
   logIncomingCall,
+  resolveInboundCaller,
   validateTwilioSignature,
 } from "../../src/core/twiml.js";
 import { lookupInboundPhone } from "../../src/config/inboundPhoneMap.js";
@@ -71,6 +72,17 @@ export default async function handler(
       "Inbound phone map match",
     );
   }
-  const twiml = buildIncomingTwiml({ role, callerNumber: from, voiceId });
+  // Recognize the caller against the hub (and text an unlinked caller a
+  // sign-in link). Fails open — an unrecognized caller still gets through
+  // as anonymous and reaches crisis resources + anonymous help.
+  const { subject, authNotice } = await resolveInboundCaller(from);
+
+  const twiml = buildIncomingTwiml({
+    role,
+    callerNumber: from,
+    voiceId,
+    subject,
+    authNotice,
+  });
   sendXml(res, 200, twiml);
 }

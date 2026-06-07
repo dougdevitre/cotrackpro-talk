@@ -1,166 +1,125 @@
 #!/usr/bin/env bash
 # scripts/sync-ssm-to-vercel.sh
 #
-# Pull every CoTrackPro Voice Center parameter from AWS SSM Parameter
-# Store (the canonical source) and push the values to a runtime — by
-# default the Vercel HTTP tier, optionally Fly.io for the WS tier.
-# Idempotent: re-running replaces existing values.
+# Mirror SHARED config from AWS SSM Parameter Store (the single source of
+# truth) into THIS app's Vercel environment at deploy time, because Vercel
+# cannot read SSM at runtime.
 #
-# SSM is the source of truth — code reads process.env only. This
-# script is the bridge.
+# This MUST stay in lockstep with the hub repo's registry:
+#   dougdevitre/cotrackpro-antigravity → docs/ops/ssm-parameters.md
+# Use the EXACT parameter names and env var names defined there (and below).
+# Never set these in the Vercel dashboard by hand.
 #
 # USAGE:
-#   ./scripts/sync-ssm-to-vercel.sh [--target vercel|fly] \
-#                                   [--env prod|preview|development] \
-#                                   [--prefix /cotrackpro/prod] \
-#                                   [--region us-east-1] \
-#                                   [--fly-app <name>] \
-#                                   [--dry-run]
+#   ./scripts/sync-ssm-to-vercel.sh [STAGE]     # STAGE ∈ {prod, test}, default prod
 #
-# Examples:
-#   ./scripts/sync-ssm-to-vercel.sh                      # prod → Vercel prod
-#   ./scripts/sync-ssm-to-vercel.sh --target fly --fly-app cotrackpro-ws
-#   ./scripts/sync-ssm-to-vercel.sh --dry-run            # plan-only, no writes
+# ENV:
+#   AWS credentials  — read-only on the namespaces below (+ kms:Decrypt)
+#   AWS_REGION       — optional, defaults to us-east-1
+#   VERCEL_TOKEN     — required
+#   VERCEL_ORG_ID / VERCEL_PROJECT_ID — set these if your Vercel CLI needs
+#                      them to resolve the project non-interactively (CI does).
 #
-# REQUIREMENTS:
-#   - aws CLI configured with read access to SSM
-#   - vercel CLI logged in and linked     (when --target vercel)
-#   - fly CLI authenticated for the app   (when --target fly)
+# IAM the CI credential needs (scope to ONLY these prefixes):
+#   ssm:GetParameter / ssm:GetParametersByPath + kms:Decrypt on
+#     /cotrackpro/<stage>/talk/*
+#     /cotrackpro/<stage>/twilio/*
+#     /cotrackpro/<stage>/elevenlabs/*
 #
-# WHAT IT SYNCS (SSM path → env var):
-#   $PREFIX/voice/inbound_phone_map      → INBOUND_PHONE_VOICE_MAP
-#   $PREFIX/elevenlabs/tts_voice_id      → ELEVENLABS_TTS_VOICE_ID
-#   $PREFIX/twilio/account_sid           → TWILIO_ACCOUNT_SID
-#   $PREFIX/twilio/auth_token            → TWILIO_AUTH_TOKEN
-#   $PREFIX/twilio/phone_number          → TWILIO_PHONE_NUMBER
-#   $PREFIX/elevenlabs/api_key           → ELEVENLABS_API_KEY
-#   $PREFIX/anthropic/api_key            → ANTHROPIC_API_KEY
-#   $PREFIX/cotrackpro/mcp_url           → COTRACKPRO_MCP_URL
+# SECURITY: secret values are NEVER echoed. They are read into memory, then
+# piped to `vercel env add` via stdin — never passed as CLI args (so they
+# can't leak into the process list or shell history). Log lines print only
+# the parameter name and ok/missing.
 
 set -euo pipefail
 
-TARGET="vercel"
-VERCEL_ENV="production"
-PREFIX="/cotrackpro/prod"
-REGION="us-east-1"
-FLY_APP="${FLY_APP_NAME:-}"
-DRY_RUN=0
+STAGE="${1:-prod}"
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --target)   TARGET="$2";     shift 2 ;;
-    --env)      VERCEL_ENV="$2"; shift 2 ;;
-    --prefix)   PREFIX="$2";     shift 2 ;;
-    --region)   REGION="$2";     shift 2 ;;
-    --fly-app)  FLY_APP="$2";    shift 2 ;;
-    --dry-run)  DRY_RUN=1;       shift   ;;
-    -h|--help)
-      grep '^#' "$0" | sed 's/^# \{0,1\}//'
-      exit 0
-      ;;
-    *) echo "Unknown arg: $1" >&2; exit 2 ;;
-  esac
-done
-
-case "$TARGET" in
-  vercel)
-    : ;;
-  fly)
-    if [[ -z "$FLY_APP" ]]; then
-      echo "Error: --target fly requires --fly-app <name> or FLY_APP_NAME" >&2
-      exit 2
-    fi
-    ;;
+# STAGE → Vercel target environment. Small case statement on purpose so the
+# mapping is trivial to change.
+case "$STAGE" in
+  prod) TARGET="production" ;;
+  test) TARGET="preview" ;;
   *)
-    echo "Unknown --target: $TARGET (expected vercel|fly)" >&2
+    echo "ERROR: STAGE must be 'prod' or 'test' (got: '${STAGE}')" >&2
     exit 2
     ;;
 esac
 
-# Mapping: SSM suffix → env var name.
-# Suffix is everything after $PREFIX/.
-declare -A MAP=(
-  ["voice/inbound_phone_map"]="INBOUND_PHONE_VOICE_MAP"
-  ["elevenlabs/tts_voice_id"]="ELEVENLABS_TTS_VOICE_ID"
-  ["twilio/account_sid"]="TWILIO_ACCOUNT_SID"
-  ["twilio/auth_token"]="TWILIO_AUTH_TOKEN"
-  ["twilio/phone_number"]="TWILIO_PHONE_NUMBER"
-  ["elevenlabs/api_key"]="ELEVENLABS_API_KEY"
-  ["anthropic/api_key"]="ANTHROPIC_API_KEY"
-  ["cotrackpro/mcp_url"]="COTRACKPRO_MCP_URL"
+REGION="${AWS_REGION:-us-east-1}"
+
+# Source-of-truth (SSM suffix under /cotrackpro/<stage>/) → Vercel env var.
+# ALL of these are REQUIRED. Keep this list identical to the hub registry.
+MAPPING=(
+  "talk/outbound_api_key:TALK_OUTBOUND_API_KEY"
+  "twilio/account_sid:TWILIO_ACCOUNT_SID"
+  "twilio/auth_token:TWILIO_AUTH_TOKEN"
+  "twilio/messaging_service_sid:TWILIO_MESSAGING_SERVICE_SID"
+  "twilio/phone_number:TWILIO_PHONE_NUMBER"
+  "elevenlabs/api_key:ELEVENLABS_API_KEY"
+  "elevenlabs/voice_id_doug:ELEVENLABS_VOICE_ID_DOUG"
 )
 
-# Push one secret to the configured target. Values are NEVER echoed —
-# this script is the bridge for production secrets, so even --dry-run
-# only prints byte counts.
-push_secret() {
-  local var_name="$1"
-  local value="$2"
-  local bytes="${#value}"
-
-  if [[ "$DRY_RUN" == "1" ]]; then
-    if [[ "$TARGET" == "vercel" ]]; then
-      echo "  would set  $var_name (bytes=$bytes) via vercel env add ... $VERCEL_ENV"
-    else
-      echo "  would set  $var_name (bytes=$bytes) via fly secrets set ... -a $FLY_APP"
-    fi
-    return 0
+# ── Preflight ───────────────────────────────────────────────────────────────
+if [[ -z "${VERCEL_TOKEN:-}" ]]; then
+  echo "ERROR: VERCEL_TOKEN is required." >&2
+  exit 2
+fi
+for bin in aws vercel; do
+  if ! command -v "$bin" >/dev/null 2>&1; then
+    echo "ERROR: '$bin' CLI not found on PATH." >&2
+    exit 2
   fi
-
-  if [[ "$TARGET" == "vercel" ]]; then
-    # vercel env add is interactive by default; pipe the value in and
-    # remove any pre-existing var so the add takes. `|| true` lets the
-    # remove no-op when nothing was set yet.
-    vercel env rm "$var_name" "$VERCEL_ENV" --yes >/dev/null 2>&1 || true
-    printf '%s' "$value" | vercel env add "$var_name" "$VERCEL_ENV" >/dev/null
-    echo "  set  $var_name (bytes=$bytes)"
-  else
-    # Buffer KEY=VALUE assignments and flush once at the end so Fly
-    # only schedules a single redeploy. The buffer is process-level
-    # state — see FLY_PAIRS below.
-    FLY_PAIRS+=("$var_name=$value")
-    echo "  queued  $var_name (bytes=$bytes)"
-  fi
-}
-
-flush_fly() {
-  if [[ "$TARGET" != "fly" ]]; then return 0; fi
-  if [[ "${#FLY_PAIRS[@]}" -eq 0 ]]; then
-    echo "  (nothing to push to Fly)"
-    return 0
-  fi
-  if [[ "$DRY_RUN" == "1" ]]; then
-    echo "  would run: fly secrets set <${#FLY_PAIRS[@]} pairs> -a $FLY_APP"
-    return 0
-  fi
-  # shellcheck disable=SC2068
-  fly secrets set ${FLY_PAIRS[@]} -a "$FLY_APP" >/dev/null
-  echo "  pushed ${#FLY_PAIRS[@]} secret(s) to Fly app $FLY_APP (1 redeploy)"
-}
-
-FLY_PAIRS=()
-echo "Syncing SSM ($PREFIX, $REGION) → target=$TARGET${DRY_RUN:+ (dry-run)}"
-[[ "$TARGET" == "vercel" ]] && echo "  vercel env: $VERCEL_ENV"
-[[ "$TARGET" == "fly"    ]] && echo "  fly app:   $FLY_APP"
-
-for suffix in "${!MAP[@]}"; do
-  ssm_name="$PREFIX/$suffix"
-  vercel_name="${MAP[$suffix]}"
-
-  if ! value="$(aws ssm get-parameter --region "$REGION" \
-        --name "$ssm_name" --with-decryption \
-        --query 'Parameter.Value' --output text 2>/dev/null)"; then
-    echo "  skip $ssm_name (not found)"
-    continue
-  fi
-
-  push_secret "$vercel_name" "$value"
 done
 
-flush_fly
+echo "Syncing SSM /cotrackpro/${STAGE}/ ($REGION) → Vercel env '${TARGET}'"
 
-if [[ "$DRY_RUN" == "1" ]]; then
-  echo "Dry-run complete. No values written."
-else
-  echo "Done. Trigger a redeploy on the target if needed."
+# ── Phase 1: fetch + validate ALL params BEFORE writing anything ─────────────
+# Two phases so that a single missing/empty REQUIRED param means we FAIL
+# CLOSED and write NOTHING — no partial, no empty env vars. An empty
+# TALK_OUTBOUND_API_KEY silently breaks bearer verification; an empty
+# TWILIO_MESSAGING_SERVICE_SID silently breaks A2P-compliant sending.
+declare -a NAMES=()
+declare -a VALUES=()
+missing=0
+
+for entry in "${MAPPING[@]}"; do
+  suffix="${entry%%:*}"
+  name="${entry##*:}"
+  path="/cotrackpro/${STAGE}/${suffix}"
+
+  # Capture value; suppress aws's own stderr so a NotFound error can't leak
+  # context into logs. A non-empty value on success → ok.
+  if value="$(aws ssm get-parameter \
+        --region "$REGION" \
+        --name "$path" \
+        --with-decryption \
+        --query 'Parameter.Value' \
+        --output text 2>/dev/null)" && [[ -n "$value" && "$value" != "None" ]]; then
+    NAMES+=("$name")
+    VALUES+=("$value")
+    echo "  fetch ${name} ... ok"
+  else
+    echo "  fetch ${name} ... MISSING (${path})" >&2
+    missing=1
+  fi
+done
+
+if [[ "$missing" -ne 0 ]]; then
+  echo "ERROR: one or more REQUIRED parameters missing/empty — wrote nothing." >&2
+  exit 1
 fi
+
+# ── Phase 2: write to Vercel, idempotently (replace if it exists) ────────────
+# Remove-then-add so a re-run yields the same env (true idempotency). The
+# value is piped via stdin, never an argv.
+for i in "${!NAMES[@]}"; do
+  name="${NAMES[$i]}"
+  value="${VALUES[$i]}"
+
+  vercel env rm "$name" "$TARGET" --yes --token "$VERCEL_TOKEN" >/dev/null 2>&1 || true
+  printf '%s' "$value" | vercel env add "$name" "$TARGET" --token "$VERCEL_TOKEN" >/dev/null
+  echo "  set   ${name} → vercel:${TARGET} ... ok"
+done
+
+echo "Done. ${#NAMES[@]} secret(s) reconciled to Vercel '${TARGET}'. Trigger a (re)deploy to pick them up."

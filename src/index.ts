@@ -19,6 +19,7 @@ import { registerTwimlRoutes } from "./handlers/twiml.js";
 import { registerOutboundRoutes } from "./handlers/outbound.js";
 import { registerRecordRoutes } from "./handlers/records.js";
 import { registerAiRoutes } from "./handlers/ai.js";
+import { registerSmsRoutes } from "./handlers/sms.js";
 import { handleCallStream } from "./handlers/callHandler.js";
 import { resolveRequestId } from "./core/requestId.js";
 
@@ -48,6 +49,7 @@ async function main() {
   registerOutboundRoutes(app);
   registerRecordRoutes(app);
   registerAiRoutes(app);
+  registerSmsRoutes(app);
 
   // Health check — includes peak session count so operators can see
   // how close we've been to the concurrent-session cap (audit E-2).

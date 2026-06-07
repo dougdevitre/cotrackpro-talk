@@ -80,19 +80,30 @@ and re-run. **Do not sync.**
 
 ## Step 3 — Sync SSM → runtimes
 
-Bridge from SSM into the runtime env vars. Always start with
-`--dry-run`; the script prints byte counts only and never echoes
-secret values.
+Two kinds of config land in the runtimes:
 
-```bash
-# Vercel HTTP tier
-./scripts/sync-ssm-to-vercel.sh --dry-run
-./scripts/sync-ssm-to-vercel.sh --env production
+- **Shared registry secrets** (Twilio, ElevenLabs, the talk bearer) →
+  Vercel via `scripts/sync-ssm-to-vercel.sh`. It mirrors the 7 params
+  owned in the hub registry (`docs/ops/ssm-parameters.md`), fails closed,
+  and never echoes values:
 
-# Fly WS tier (single redeploy via batched fly secrets set)
-FLY_APP_NAME=cotrackpro-ws ./scripts/sync-ssm-to-vercel.sh --target fly --dry-run
-FLY_APP_NAME=cotrackpro-ws ./scripts/sync-ssm-to-vercel.sh --target fly
-```
+  ```bash
+  ./scripts/sync-ssm-to-vercel.sh prod    # → Vercel production
+  ./scripts/sync-ssm-to-vercel.sh test    # → Vercel preview
+  ```
+
+- **`INBOUND_PHONE_VOICE_MAP`** (this doc's subject) is NOT a registry
+  secret, so it is synced separately. The Fly WS tier picks it up from
+  SSM via the deploy workflow (`.github/workflows/fly-deploy.yml`). For
+  the Vercel HTTP tier, mirror the SSM value directly:
+
+  ```bash
+  val="$(aws ssm get-parameter --region us-east-1 \
+    --name /cotrackpro/prod/voice/inbound_phone_map \
+    --query Parameter.Value --output text)"
+  vercel env rm  INBOUND_PHONE_VOICE_MAP production --yes || true
+  printf '%s' "$val" | vercel env add INBOUND_PHONE_VOICE_MAP production
+  ```
 
 ## Step 4 — Redeploy
 
@@ -177,8 +188,9 @@ behavior. No code rollback needed.
 aws ssm put-parameter --region us-east-1 --type String --overwrite \
   --name /cotrackpro/prod/voice/inbound_phone_map --value '{}'
 
-./scripts/sync-ssm-to-vercel.sh --env production
-FLY_APP_NAME=cotrackpro-ws ./scripts/sync-ssm-to-vercel.sh --target fly
+# Re-mirror the (now-empty) map to Vercel; Fly picks it up on next deploy.
+vercel env rm  INBOUND_PHONE_VOICE_MAP production --yes || true
+printf '%s' '{}' | vercel env add INBOUND_PHONE_VOICE_MAP production
 vercel deploy --prod && fly deploy -a cotrackpro-ws
 ```
 
@@ -193,5 +205,5 @@ vercel deploy --prod && fly deploy -a cotrackpro-ws
 | `npm run configure:twilio -- +<E164>`     | set Twilio voice webhook on a number                |
 | `npm run show:twilio -- +<E164>`          | read back current Twilio config for a number        |
 | `npm run generate-audio`                  | regenerate the prerecorded greeting/hold/error cache|
-| `./scripts/sync-ssm-to-vercel.sh --dry-run` | preview the SSM → Vercel sync                     |
-| `./scripts/sync-ssm-to-vercel.sh --target fly --dry-run` | preview the SSM → Fly sync           |
+| `./scripts/sync-ssm-to-vercel.sh prod`    | mirror the 7 registry secrets → Vercel production   |
+| `./scripts/sync-ssm-to-vercel.sh test`    | mirror the 7 registry secrets → Vercel preview      |

@@ -257,11 +257,13 @@ Set `INBOUND_PHONE_VOICE_MAP` to a JSON object keyed by E.164 phone number to pi
 { "+13143948500": { "voiceId": "2ydcbtd5sJZRYFMNgMVZ", "role": "parent" } }
 ```
 
-Canonical source is AWS SSM at `/cotrackpro/prod/voice/inbound_phone_map`; `scripts/sync-ssm-to-vercel.sh` mirrors that value (and the other secrets) to Vercel env vars. To point a Twilio number at this app's webhook programmatically, run `npm run configure:twilio -- +13143948500` (uses `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN` + `API_DOMAIN`).
+Canonical source is AWS SSM at `/cotrackpro/<stage>/voice/inbound_phone_map`. The Fly WS tier picks it up via the deploy workflow; for the Vercel HTTP tier, set `INBOUND_PHONE_VOICE_MAP` from that value with `vercel env` (see `docs/GO_LIVE-inbound-voice.md`). The 7 shared registry secrets (Twilio/ElevenLabs/talk bearer) are mirrored separately by `scripts/sync-ssm-to-vercel.sh`. To point a Twilio number at this app's webhook programmatically, run `npm run configure:twilio -- +13143948500` (uses `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN` + `API_DOMAIN`).
 
 Go-live runbook: [`docs/GO_LIVE-inbound-voice.md`](docs/GO_LIVE-inbound-voice.md).
 
 ## Production Deployment
+
+> **Shared secrets are owned in AWS SSM** (see the hub repo `docs/ops/ssm-parameters.md`); `scripts/sync-ssm-to-vercel.sh` mirrors them into this app's Vercel env at deploy time. **Never set these in the Vercel dashboard by hand.** Run it per target before the Vercel build — `./scripts/sync-ssm-to-vercel.sh prod` (→ Vercel `production`) or `./scripts/sync-ssm-to-vercel.sh test` (→ `preview`). CI: `.github/workflows/vercel-env-sync.yml`.
 
 ### Security checklist
 
