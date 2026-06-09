@@ -4,22 +4,214 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <meta name="robots" content="noindex" />
-  <title>CoTrackPro Voice Center</title>
+  <title>CoTrackPro · Calls &amp; Texts</title>
+  <meta name="description" content="The calls-and-texts companion to CoTrackPro: gentle reminders, two-way texting, and a calm voice line for families navigating high-conflict separation." />
   <style>
-    body{font:14px/1.5 system-ui,-apple-system,sans-serif;max-width:540px;margin:6rem auto;padding:0 1rem;color:#222}
-    code{background:#f4f4f4;padding:1px 6px;border-radius:3px;font-size:13px}
-    h1{font-size:1.1rem;margin:0 0 .75rem}
-    p{margin:.5rem 0;color:#555}
+    :root{
+      --bg:#f6f5f1; --surface:#ffffff; --ink:#1f2933; --muted:#5b6b73;
+      --line:#e6e3dc; --primary:#2f6f6a; --primary-ink:#22524e;
+      --soft:#eef4f3; --accent:#a8642f; --safe-bg:#fbf3ec; --safe-line:#e7d2bc;
+      --radius:14px;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;color:var(--ink);background:var(--bg);
+      font:16px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+      -webkit-font-smoothing:antialiased;
+    }
+    .wrap{max-width:920px;margin:0 auto;padding:0 1.25rem}
+    a{color:var(--primary-ink)}
+    h1,h2,h3{line-height:1.25;color:var(--ink);margin:0}
+    .muted{color:var(--muted)}
+    code{background:#eef0ee;padding:1px 7px;border-radius:5px;font-size:.92em}
+
+    /* Hero */
+    header.hero{background:linear-gradient(180deg,#eef4f3,var(--bg));border-bottom:1px solid var(--line)}
+    .brand{display:flex;align-items:center;gap:.6rem;padding:1.4rem 0 .2rem}
+    .logo{width:34px;height:34px;border-radius:9px;background:var(--primary);color:#fff;
+      display:grid;place-items:center;font-weight:700;font-size:1rem;letter-spacing:.02em}
+    .brand b{font-size:1.05rem}
+    .hero-body{padding:1.2rem 0 2.4rem}
+    .hero-body h1{font-size:2rem;letter-spacing:-.01em;margin:.4rem 0 .6rem}
+    .hero-body p.lead{font-size:1.12rem;color:var(--muted);max-width:42rem;margin:0}
+    .tag{display:inline-block;font-size:.78rem;font-weight:600;color:var(--primary-ink);
+      background:var(--soft);border:1px solid var(--line);padding:.2rem .6rem;border-radius:999px}
+
+    /* Safety */
+    .safety{background:var(--safe-bg);border:1px solid var(--safe-line);border-radius:var(--radius);
+      padding:1.1rem 1.2rem;margin:1.6rem 0}
+    .safety h2{font-size:1rem;color:var(--accent);margin-bottom:.5rem}
+    .safety ul{margin:.3rem 0 0;padding-left:1.1rem}
+    .safety li{margin:.25rem 0}
+
+    section{padding:1.9rem 0;border-top:1px solid var(--line)}
+    section h2{font-size:1.32rem;margin-bottom:.3rem}
+    section > p.sub{color:var(--muted);margin:.2rem 0 1.1rem;max-width:44rem}
+
+    .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:1rem}
+    .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:1.1rem 1.15rem}
+    .card h3{font-size:1.05rem;margin-bottom:.4rem;display:flex;align-items:center;gap:.5rem}
+    .card .chip{font-size:.72rem;font-weight:600;color:#fff;background:var(--primary);border-radius:999px;padding:.12rem .5rem}
+    .card p{margin:.4rem 0 0;color:var(--muted);font-size:.96rem}
+    .card ul{margin:.5rem 0 0;padding-left:1.1rem;color:var(--muted);font-size:.95rem}
+    .card li{margin:.22rem 0}
+
+    table{width:100%;border-collapse:collapse;background:var(--surface);
+      border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;font-size:.95rem}
+    th,td{text-align:left;padding:.65rem .85rem;border-bottom:1px solid var(--line);vertical-align:top}
+    th{background:var(--soft);font-size:.82rem;text-transform:uppercase;letter-spacing:.04em;color:var(--primary-ink)}
+    tr:last-child td{border-bottom:none}
+    td code{white-space:nowrap}
+
+    ol.play{counter-reset:step;list-style:none;padding:0;margin:0;display:grid;gap:.7rem}
+    ol.play > li{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+      padding:.85rem 1rem .85rem 3rem;position:relative}
+    ol.play > li::before{counter-increment:step;content:counter(step);position:absolute;left:.85rem;top:.85rem;
+      width:1.5rem;height:1.5rem;border-radius:50%;background:var(--primary);color:#fff;
+      display:grid;place-items:center;font-size:.85rem;font-weight:700}
+    ol.play b{display:block;margin-bottom:.1rem}
+    ol.play span{color:var(--muted);font-size:.95rem}
+
+    .note{background:var(--soft);border:1px solid var(--line);border-radius:var(--radius);padding:1rem 1.15rem;color:var(--muted);font-size:.95rem}
+    .note b{color:var(--ink)}
+
+    footer{border-top:1px solid var(--line);padding:1.6rem 0 2.4rem;color:var(--muted);font-size:.88rem}
+    footer .row{display:flex;flex-wrap:wrap;gap:.4rem 1.2rem;margin-top:.6rem}
+    footer a{text-decoration:none}
+    .disclaimer{font-size:.85rem;line-height:1.55}
   </style>
 </head>
 <body>
-  <h1>CoTrackPro Voice Center</h1>
-  <p>API only. Useful endpoints:</p>
-  <ul>
-    <li><code>POST /call/incoming</code> &mdash; Twilio voice webhook</li>
-    <li><code>GET /health</code> &mdash; tier + uptime</li>
-    <li><code>GET /dashboard</code> &mdash; admin UI (Bearer auth)</li>
-  </ul>
-  <p>Repo: <a href="https://github.com/dougdevitre/cotrackpro-talk">dougdevitre/cotrackpro-talk</a>.</p>
+  <header class="hero">
+    <div class="wrap">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">CT</span>
+        <b>CoTrackPro</b><span class="muted">· Calls &amp; Texts</span>
+      </div>
+      <div class="hero-body">
+        <span class="tag">Part of your CoTrackPro account</span>
+        <h1>The reminders and texts that keep the details from slipping.</h1>
+        <p class="lead">CoTrackPro is a calm, court-neutral way to keep a clear record while
+          co-parenting through a hard season. This is the part that reaches your phone — gentle
+          reminders, two-way texting, and a voice line — so deadlines, exchanges, and notes don't
+          fall through the cracks. You're already doing the hard work; this just helps it stick.</p>
+      </div>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <div class="safety" role="note" aria-label="Safety resources">
+      <h2>If you need help right now</h2>
+      <ul>
+        <li><b>911</b> — immediate physical danger.</li>
+        <li><b>988</b> — Suicide &amp; Crisis Lifeline (call or text, 24/7).</li>
+        <li>Text <b>HOME</b> to <b>741741</b> — Crisis Text Line.</li>
+        <li><b>1‑800‑799‑7233</b> — National Domestic Violence Hotline.</li>
+        <li><b>1‑800‑422‑4453</b> — Childhelp National Child Abuse Hotline.</li>
+      </ul>
+    </div>
+
+    <section id="how">
+      <h2>How it works, for where you are</h2>
+      <p class="sub">The same calm, neutral record underneath — shaped to what you need from it today.</p>
+      <div class="cards">
+        <div class="card">
+          <h3><span class="chip">Parents</span></h3>
+          <p>Stay on top of what matters without living in your calendar.</p>
+          <ul>
+            <li>A heads-up text before an exchange or a court/school deadline.</li>
+            <li>Reply <code>CONFIRM</code> or <code>SNOOZE</code> to a reminder.</li>
+            <li>Text <code>LOG</code> to capture something the moment it happens.</li>
+            <li>For high-priority items, a short call in a familiar, steady voice.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3><span class="chip">Professionals</span></h3>
+          <p>Attorneys, GALs, mediators, evaluators, and counselors.</p>
+          <ul>
+            <li>Families keep their own timestamped record — less chasing.</li>
+            <li>Reminders are neutral and time-based; no case detail in any message.</li>
+            <li>Nothing here characterizes either parent — it describes events and times.</li>
+            <li>You work from the same record inside the CoTrackPro app.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3><span class="chip">In crisis · unsure</span></h3>
+          <p>Help is never gated behind signing in.</p>
+          <ul>
+            <li>Text <code>RESOURCES</code> or <code>SAFE</code> for support links.</li>
+            <li>Call the line for crisis resources and calm, anonymous help.</li>
+            <li>Safety resources come from vetted national sources, always.</li>
+            <li>Not sure where to start? The safety box above is a good first step.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="keywords">
+      <h2>Text these words anytime</h2>
+      <p class="sub">Case-insensitive — just send the word as the start of your message.</p>
+      <table>
+        <thead><tr><th>Text</th><th>What happens</th></tr></thead>
+        <tbody>
+          <tr><td><code>DEADLINES</code></td><td>Your upcoming time-sensitive items.</td></tr>
+          <tr><td><code>LOG</code></td><td>Start a note that's timestamped to your record.</td></tr>
+          <tr><td><code>CONFIRM</code></td><td>Acknowledge the reminder you just received.</td></tr>
+          <tr><td><code>SNOOZE</code></td><td>Push a reminder to a little later.</td></tr>
+          <tr><td><code>RESOURCES</code> · <code>SAFE</code></td><td>Support and safety links.</td></tr>
+          <tr><td><code>HELP</code></td><td>What this service is, plus how to opt out.</td></tr>
+          <tr><td><code>STOP</code></td><td>Unsubscribe from messages immediately.</td></tr>
+          <tr><td><code>START</code></td><td>Resume messages after a STOP.</td></tr>
+        </tbody>
+      </table>
+      <p class="muted" style="margin-top:.7rem;font-size:.9rem">Every message we compose ends with:
+        <em>“Reply STOP to unsubscribe, HELP for help.”</em></p>
+    </section>
+
+    <section id="playbooks">
+      <h2>Playbooks</h2>
+      <p class="sub">A few common situations, start to finish.</p>
+      <ol class="play">
+        <li><b>Never miss an exchange or deadline</b>
+          <span>Opt in once. You get a short text the day before. Reply <code>CONFIRM</code> when you've
+          got it, or <code>SNOOZE</code> to be reminded again — it's all logged either way.</span></li>
+        <li><b>Capture something the moment it happens</b>
+          <span>Text <code>LOG</code> followed by what occurred. It's timestamped to your record, so you're
+          not reconstructing dates from memory later.</span></li>
+        <li><b>You need support — or you don't feel safe</b>
+          <span>Text <code>RESOURCES</code> or <code>SAFE</code>, or call the line. You'll get vetted help
+          links right away; in immediate danger, use <b>911</b> or the numbers in the safety box.</span></li>
+        <li><b>Pause or stop the messages</b>
+          <span>Text <code>STOP</code> anytime and messages end immediately — no questions, no friction.
+          Text <code>START</code> whenever you're ready to resume.</span></li>
+      </ol>
+    </section>
+
+    <section id="privacy">
+      <h2>Consent &amp; privacy</h2>
+      <p class="sub">Built to be safe to use even when things are tense.</p>
+      <div class="note">
+        <p style="margin-top:0"><b>Court-neutral by design.</b> Messages describe events and times.
+          They never characterize the other parent, and never include private case detail —
+          a reminder says <em>“exchange at 5pm,”</em> not the specifics.</p>
+        <p><b>You're in control.</b> <code>STOP</code> opts you out instantly and we honor it across both
+          texts and calls; <code>START</code> brings them back. Standard message &amp; data rates may apply.</p>
+        <p style="margin-bottom:0"><b>Minimal by default.</b> We correlate messages by an opaque key, not by
+          logging your number or the message body. This is documentation support — <b>not legal or
+          clinical advice, and not a substitute for a licensed professional or emergency services.</b></p>
+      </div>
+    </section>
+
+    <footer>
+      <div><b>CoTrackPro</b> · Calls &amp; Texts — the telephony edge of your CoTrackPro account.</div>
+      <div class="row">
+        <a href="/health">Service status</a>
+        <a href="https://github.com/dougdevitre/cotrackpro-talk">Source (dougdevitre/cotrackpro-talk)</a>
+      </div>
+      <p class="disclaimer" style="margin-top:1rem">CoTrackPro is a trauma-informed, child-centered,
+        court-neutral documentation platform. Information provided through this service is educational and
+        informational only. If you or a child are in immediate danger, call 911.</p>
+    </footer>
+  </div>
 </body>
 </html>
