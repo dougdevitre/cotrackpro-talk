@@ -31,8 +31,8 @@ never blocked.
 |------|----------|-----------------|
 | `resolvePhone(phone)` | `POST {HUB_BASE_URL}/internal/v1/resolve-phone` | `linked{subject}`, `not_linked`, `unauthorized`, `not_configured`, `invalid`, `error` |
 | `sendAuthLink(phone)` | `POST {HUB_BASE_URL}/internal/v1/send-auth-link` | `sent`, `rate_limited`, `sms_unavailable`, `not_configured`, `invalid`, `unauthorized`, `error` |
-| `recordConsent(phone, state)` | `POST {HUB_BASE_URL}/internal/v1/record-consent` | `ok`, `unauthorized`, `not_configured`, `invalid`, `error` |
-| `forwardInboundSms(args)` | `POST {HUB_BASE_URL}/internal/v1/inbound-sms` | `ok{reply?}`, `unauthorized`, `not_configured`, `invalid`, `error` |
+| `recordConsent(phone, consent)` → body `{ phone, consent }` | `POST {HUB_BASE_URL}/internal/v1/record-consent` | `ok`, `unauthorized`, `not_configured`, `invalid`, `error` |
+| `forwardInboundSms({ phone, keyword })` | `POST {HUB_BASE_URL}/internal/v1/inbound-sms` | `ok{reply?}`, `not_linked`, `unauthorized`, `not_configured`, `invalid`, `error` |
 
 The talk edge **never sees the token** — on `send-auth-link` the hub
 composes the entire SMS body and sends it back through our
@@ -145,9 +145,10 @@ registry secrets in the Vercel dashboard by hand.
 
 - A2P 10DLC brand + campaign on the number (trial/verified number for testing).
 - STOP/HELP/START handling, suppression list, quiet hours, frequency caps.
-- Separate explicit VOICE consent before outbound calls — enforced by the
-  `REQUIRE_VOICE_CONSENT` gate (the hub must send `consent: true` on
-  `/api/call/outbound`; talk 403s otherwise).
+- Separate explicit VOICE consent before outbound calls — enforced
+  **hub-side** (`isAllowedNow`); `/api/call/outbound` carries no `consent`
+  field, so the talk-side `REQUIRE_VOICE_CONSENT` gate stays OFF by default
+  (it's an opt-in defense-in-depth switch only).
 - **Shared KV is required in production** (the suppression list +
   idempotency are non-durable on the in-memory backend).
 
