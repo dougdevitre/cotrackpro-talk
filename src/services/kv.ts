@@ -25,6 +25,14 @@
  * incrBy / delete. Add methods only when a caller actually needs one.
  */
 
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  UpdateCommand,
+  DeleteCommand,
+} from "@aws-sdk/lib-dynamodb";
 import { env } from "../config/env.js";
 import { logger } from "../utils/logger.js";
 
@@ -385,12 +393,159 @@ class UpstashKv implements KvStore {
   }
 }
 
+// ── DynamoDB backend ────────────────────────────────────────────────────────
+//
+// AWS-native alternative to Upstash. DynamoDB is HTTP-based (no VPC, unlike
+// ElastiCache), so it works from Vercel serverless, and it has native TTL.
+// One table, partition key `pk` (String). A key holds EITHER a string value
+// (`v`, for idempotency + suppression) OR a counter (`n`, for rate limits) —
+// never both in our usage — plus an optional `expireAt` (epoch seconds, the
+// DynamoDB TTL attribute).
+//
+// DynamoDB's TTL sweep is LAZY (can lag up to ~48h), so — exactly like
+// MemoryKv — we store an explicit `expireAt` and treat an item whose
+// `expireAt` has passed as MISSING on read. That keeps semantics correct
+// regardless of when DynamoDB actually deletes the row.
+//
+// The counter path (`incrBy`) sets the TTL only on the first write via
+// `if_not_exists(expireAt, …)`. This is safe because every counter key is
+// the rate limiter's time-bucketed key (`rl:<ns>:<client>:<m|h|d>:<bucket>`):
+// a new window is always a NEW key, so a lingering expired bucket is never
+// re-incremented and can't continue an old count.
+
+export type DynamoKvItem = {
+  pk: string;
+  v?: string;
+  n?: number;
+  expireAt?: number;
+};
+
+/**
+ * The minimal DynamoDB surface DynamoKv needs. Production wraps the AWS
+ * SDK DocumentClient; tests inject an in-memory fake so the KV logic
+ * (TTL-on-read filtering, counter + first-write-TTL semantics, pipeline
+ * ordering) is unit-tested without AWS.
+ */
+export interface DynamoKvClient {
+  getItem(pk: string): Promise<DynamoKvItem | null>;
+  putItem(item: DynamoKvItem): Promise<void>;
+  /** Atomic `ADD n :by`, setting `expireAt` only if not already set.
+   *  Returns the new counter value. */
+  addToCounter(pk: string, by: number, expireAt?: number): Promise<number>;
+  deleteItem(pk: string): Promise<void>;
+}
+
+class DynamoKv implements KvStore {
+  constructor(private readonly client: DynamoKvClient) {}
+
+  private nowSec(): number {
+    return Math.floor(Date.now() / 1000);
+  }
+
+  private isExpired(item: DynamoKvItem): boolean {
+    return item.expireAt !== undefined && this.nowSec() >= item.expireAt;
+  }
+
+  async get(key: string): Promise<string | null> {
+    const item = await this.client.getItem(key);
+    if (!item || this.isExpired(item)) return null;
+    if (item.v !== undefined) return item.v;
+    if (item.n !== undefined) return String(item.n);
+    return null;
+  }
+
+  async set(key: string, value: string, ttlSeconds?: number): Promise<void> {
+    await this.client.putItem({
+      pk: key,
+      v: value,
+      expireAt: ttlSeconds ? this.nowSec() + ttlSeconds : undefined,
+    });
+  }
+
+  async incrBy(key: string, by: number = 1, ttlSeconds?: number): Promise<number> {
+    return this.client.addToCounter(
+      key,
+      by,
+      ttlSeconds ? this.nowSec() + ttlSeconds : undefined,
+    );
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.client.deleteItem(key);
+  }
+
+  async pipeline(ops: PipelineOp[]): Promise<number[]> {
+    // DynamoDB has no values-returning batch, so run the incrBy ops in
+    // turn — same semantics as MemoryKv. The rate limiter only ever
+    // pipelines 2-3 ops, so the extra round-trips are negligible.
+    const results: number[] = [];
+    for (const op of ops) {
+      if (op.op === "incrBy") {
+        results.push(await this.incrBy(op.key, op.by, op.ttlSeconds));
+      }
+    }
+    return results;
+  }
+}
+
+/** Production DynamoKvClient backed by the AWS SDK DocumentClient. */
+function realDynamoKvClient(table: string): DynamoKvClient {
+  const doc = DynamoDBDocumentClient.from(
+    new DynamoDBClient({
+      region: env.dynamoRegion,
+      maxAttempts: env.dynamoMaxRetries + 1, // AWS counts the initial try
+    }),
+    { marshallOptions: { removeUndefinedValues: true } },
+  );
+
+  return {
+    async getItem(pk) {
+      const out = await doc.send(new GetCommand({ TableName: table, Key: { pk } }));
+      return (out.Item as DynamoKvItem | undefined) ?? null;
+    },
+    async putItem(item) {
+      // removeUndefinedValues drops `expireAt` when no TTL was requested.
+      await doc.send(new PutCommand({ TableName: table, Item: item }));
+    },
+    async addToCounter(pk, by, expireAt) {
+      const names: Record<string, string> = { "#n": "n" };
+      const values: Record<string, number> = { ":by": by };
+      let expr = "ADD #n :by";
+      if (expireAt !== undefined) {
+        expr = "SET expireAt = if_not_exists(expireAt, :e) ADD #n :by";
+        values[":e"] = expireAt;
+      }
+      const out = await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { pk },
+          UpdateExpression: expr,
+          ExpressionAttributeNames: names,
+          ExpressionAttributeValues: values,
+          ReturnValues: "UPDATED_NEW",
+        }),
+      );
+      return Number((out.Attributes as { n?: number } | undefined)?.n ?? by);
+    },
+    async deleteItem(pk) {
+      await doc.send(new DeleteCommand({ TableName: table, Key: { pk } }));
+    },
+  };
+}
+
 // ── Backend selection ───────────────────────────────────────────────────────
 
 function resolveBackend(): KvStore {
   const requested = env.kvBackend;
   const url = env.kvUrl;
   const token = env.kvToken;
+
+  // Explicit opt-in only — `auto` never picks dynamo (it would require AWS
+  // creds + a provisioned table that memory/upstash users don't have).
+  if (requested === "dynamo") {
+    log.info({ table: env.kvDynamoTable }, "KV backend: dynamo");
+    return new DynamoKv(realDynamoKvClient(env.kvDynamoTable));
+  }
 
   if (requested === "upstash" || (requested === "auto" && url && token)) {
     if (!url || !token) {
@@ -430,3 +585,7 @@ export function _setKvForTests(store: KvStore): void {
 
 /** Test-only: expose MemoryKv for direct unit tests. */
 export { MemoryKv as _MemoryKvForTests };
+
+/** Test-only: expose DynamoKv for direct unit tests (drive it with a fake
+ *  DynamoKvClient so no AWS is touched). */
+export { DynamoKv as _DynamoKvForTests };

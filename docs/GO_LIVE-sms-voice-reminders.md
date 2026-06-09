@@ -55,11 +55,34 @@ pre-existing — re-put only when rotating.
 
 ## Step 2 — Shared KV (MANDATORY) ⚠️
 
-The suppression list (STOP) and idempotency (`dedupeKey`) live in the KV
-store (`src/services/kv.ts`). The default backend is **in-memory and
-per-process** — on Vercel serverless that means **an opt-out written on
-one request is invisible to the next**, and `dedupeKey` won't dedupe a
-retry. You MUST point KV at Upstash/Vercel KV:
+The suppression list (STOP), idempotency (`dedupeKey`), and rate-limit
+counters live in the KV store (`src/services/kv.ts`). The default backend
+is **in-memory and per-process** — on Vercel serverless that means **an
+opt-out written on one request is invisible to the next**, and `dedupeKey`
+won't dedupe a retry. Pick ONE durable backend.
+
+**Option A — DynamoDB (AWS-native, no third-party vendor):**
+
+```bash
+# One-time: create the table (partition key pk, on-demand billing) + TTL.
+aws dynamodb create-table --region us-east-1 \
+  --table-name cotrackpro-kv \
+  --attribute-definitions AttributeName=pk,AttributeType=S \
+  --key-schema AttributeName=pk,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST
+aws dynamodb update-time-to-live --region us-east-1 \
+  --table-name cotrackpro-kv \
+  --time-to-live-specification "Enabled=true,AttributeName=expireAt"
+
+# Point the app at it (the Vercel functions need AWS creds in the env —
+# set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION for a least-
+# privilege IAM user with GetItem/PutItem/UpdateItem/DeleteItem on the table).
+vercel env add KV_BACKEND     production   # value: dynamo
+vercel env add KV_DYNAMO_TABLE production   # value: cotrackpro-kv
+vercel env add AWS_REGION     production   # value: us-east-1
+```
+
+**Option B — Upstash / Vercel KV:**
 
 ```bash
 vercel env add KV_URL   production   # https://<db>.upstash.io
@@ -68,7 +91,7 @@ vercel env add KV_TOKEN production   # Upstash REST token
 ```
 
 Do **not** go live on the memory backend. STOP compliance and the
-no-double-send guarantee both depend on this.
+no-double-send guarantee both depend on a durable shared backend.
 
 ## Step 3 — App config (non-secret env)
 
