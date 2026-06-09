@@ -86,6 +86,49 @@ describe("/sms/incoming — START", () => {
   });
 });
 
+describe("/sms/incoming — Twilio Advanced Opt-Out (OptOutType)", () => {
+  it("STOP via OptOutType: syncs suppression + consent, sends NO reply (Twilio already did)", async () => {
+    const captured: Captured[] = [];
+    _setHubFetchForTests(stubFetch(200, {}, captured));
+
+    const req = smsReq({
+      From: "+15551230123",
+      To: "+15559990000",
+      Body: "STOP",
+      OptOutType: "STOP",
+    });
+    const { res, getStatus, getBody } = mockResponse();
+    await incomingSms(req, res);
+
+    assert.equal(getStatus(), 200);
+    assert.equal(await isSuppressed("+15551230123"), true);
+    const consent = captured.find((c) => c.url.endsWith("/internal/v1/record-consent"));
+    assert.ok(consent);
+    assert.equal(JSON.parse(consent!.init.body as string).state, "opted_out");
+    // Twilio already replied → we must NOT send a second <Message>.
+    assert.doesNotMatch(getBody(), /<Message>/);
+  });
+
+  it("START via OptOutType: unsuppresses + opted_in, no reply", async () => {
+    const captured: Captured[] = [];
+    _setHubFetchForTests(stubFetch(200, {}, captured));
+    await suppress("+15551230123");
+
+    const req = smsReq({
+      From: "+15551230123",
+      To: "+15559990000",
+      Body: "START",
+      OptOutType: "START",
+    });
+    const { res, getStatus, getBody } = mockResponse();
+    await incomingSms(req, res);
+
+    assert.equal(getStatus(), 200);
+    assert.equal(await isSuppressed("+15551230123"), false);
+    assert.doesNotMatch(getBody(), /<Message>/);
+  });
+});
+
 describe("/sms/incoming — HELP", () => {
   it("replies statically WITHOUT calling the hub", async () => {
     const captured: Captured[] = [];

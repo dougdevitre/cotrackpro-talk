@@ -132,16 +132,20 @@ vercel env ls production | grep -E 'MESSAGING_SERVICE_SID|VOICE_ID_DOUG|KV_URL'
 
 - Confirm the Messaging Service's **brand + campaign are APPROVED** and
   the sending number is attached. Unregistered A2P traffic is filtered.
-- **Advanced Opt-Out alignment.** If the Messaging Service has carrier
-  Advanced Opt-Out enabled, Twilio intercepts STOP itself and our
-  `/sms/incoming` may not see it. Decide who owns suppression:
-  - Let our app own it → **disable** Advanced Opt-Out on the service so
-    STOP reaches `/sms/incoming` (it writes the suppression list + calls
-    `record-consent`).
-  - Let Twilio own it → keep it on, and know our app-level suppression
-    list will only catch STOPs that bypass the carrier layer.
-  Running both un-aligned risks a number Twilio considers opted-out but
-  our list considers active (or vice-versa).
+- **Advanced Opt-Out** — either topology now works; the app keeps both
+  sides in sync:
+  - **Enabled (recommended for A2P):** Twilio processes STOP/START/HELP
+    and sends its configured replies, then fires `/sms/incoming` with an
+    `OptOutType` field. The app honors that — syncing our suppression list
+    + `record-consent` so the **voice** path also respects the opt-out —
+    and returns empty TwiML so it doesn't double-reply. Separately, if a
+    send is attempted to an opted-out number, Twilio returns error
+    **21610**; `/api/sms/send` catches it, returns the `suppressed`
+    sentinel, and syncs our list.
+  - **Disabled:** STOP reaches `/sms/incoming` as a normal keyword and the
+    app owns suppression + the reply directly.
+  Configure Twilio's STOP/START/HELP response copy to match
+  `src/core/consent.ts` so the wording is consistent.
 - Quiet hours / frequency caps: confirm these are enforced hub-side
   (talk enforces only the per-min/hour/day rate caps, not time-of-day).
 

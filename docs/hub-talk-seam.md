@@ -95,6 +95,15 @@ outbound SMS **and** voice paths — a suppressed number is never texted or
 called. The canonical opt-out footer is appended (exactly once) only to
 **talk-composed** inbound replies; outbound hub bodies are sent verbatim.
 
+**Twilio Advanced Opt-Out interop.** When the Messaging Service handles
+opt-out at the carrier level, inbound STOP/START/HELP arrive with an
+`OptOutType` field (Twilio already replied) — the webhook syncs our
+suppression list + `record-consent` and stays silent. And an outbound send
+to an opted-out number fails with Twilio error `21610`, which `/api/sms/send`
+maps to the `suppressed` sentinel (also syncing our list so voice honors
+it). So the SMS opt-out state Twilio owns is always mirrored into the list
+the voice path reads.
+
 ## Inbound voice loop (`src/core/twiml.ts` → `callHandler`)
 
 On an inbound call the webhook calls `resolveInboundCaller(from)`:

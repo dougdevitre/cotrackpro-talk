@@ -93,6 +93,28 @@ export default async function handler(
     return;
   }
 
+  // Twilio Advanced Opt-Out: when the Messaging Service has carrier-level
+  // opt-out enabled, Twilio processes STOP/START/HELP itself AND already
+  // sent its configured reply, then still fires this webhook with an
+  // `OptOutType` field. Honor it so OUR suppression list + the hub's
+  // consent record stay in sync with Twilio (the voice path reads our
+  // list) — but return EMPTY TwiML so we don't double-reply on top of
+  // Twilio's response.
+  const optOutType = (body.OptOutType ?? "").toUpperCase();
+  if (optOutType) {
+    if (optOutType === "STOP") {
+      await suppress(from);
+      await recordConsent(from, "opted_out", "STOP");
+    } else if (optOutType === "START") {
+      await unsuppress(from);
+      await recordConsent(from, "opted_in", "START");
+    }
+    // STOP / START / HELP — Twilio already replied; send nothing.
+    log.info({ messageSid, optOutType }, "Twilio Advanced Opt-Out handled");
+    sendXml(res, 200, twimlMessage(undefined));
+    return;
+  }
+
   if (keyword === "stop") {
     // Suppress FIRST (talk owns the number), then best-effort record
     // consent with the hub so a hub hiccup never leaves us still sending.

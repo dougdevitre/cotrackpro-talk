@@ -23,7 +23,7 @@ import {
   _MemoryKvForTests as MemoryKv,
 } from "../src/services/kv.js";
 import { _resetPhoneValidationCacheForTests } from "../src/core/phoneValidation.js";
-import { suppress, unsuppress, OPT_OUT_FOOTER } from "../src/core/consent.js";
+import { suppress, unsuppress, isSuppressed, OPT_OUT_FOOTER } from "../src/core/consent.js";
 
 beforeEach(() => {
   // Fresh KV per test so idempotency + rate-limit state doesn't leak.
@@ -199,6 +199,42 @@ describe("sendSms — suppression", () => {
     assert.equal(r.status, 200);
     if (r.ok) assert.equal(r.body.sid, "SM_ok");
     assert.equal(calls, 1);
+  });
+});
+
+describe("sendSms — Twilio Advanced Opt-Out (error 21610)", () => {
+  it("treats a 21610 as suppressed: returns the sentinel and syncs our list", async () => {
+    _setSmsSenderForTests(async () => {
+      const e = new Error("unsubscribed recipient") as Error & { code?: number };
+      e.code = 21610;
+      throw e;
+    });
+
+    const r = await sendSms({ to: "+15551230123", body: "hi", dedupeKey: "optout-1" });
+    assert.equal(r.status, 200);
+    if (r.ok) assert.equal(r.body.sid, "suppressed");
+    // Synced locally so the VOICE path honors the opt-out too.
+    assert.equal(await isSuppressed("+15551230123"), true);
+  });
+
+  it("does NOT cache the 21610 sentinel — a later opt-in retry can send", async () => {
+    let throwIt = true;
+    _setSmsSenderForTests(async () => {
+      if (throwIt) {
+        const e = new Error("unsubscribed") as Error & { code?: number };
+        e.code = 21610;
+        throw e;
+      }
+      return { sid: "SM_after" };
+    });
+    const first = await sendSms({ to: "+15551230123", body: "hi", dedupeKey: "optout-2" });
+    assert.equal(first.ok && first.body.sid, "suppressed");
+
+    throwIt = false;
+    await unsuppress("+15551230123");
+    const second = await sendSms({ to: "+15551230123", body: "hi", dedupeKey: "optout-2" });
+    assert.equal(second.status, 200);
+    if (second.ok) assert.equal(second.body.sid, "SM_after");
   });
 });
 

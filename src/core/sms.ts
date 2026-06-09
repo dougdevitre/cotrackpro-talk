@@ -31,7 +31,7 @@ import {
   replayIdempotent,
   storeIdempotent,
 } from "./idempotency.js";
-import { isSuppressed } from "./consent.js";
+import { isSuppressed, suppress } from "./consent.js";
 import { maskPhoneNumber } from "../services/dynamo.js";
 
 const log = logger.child({ core: "sms" });
@@ -295,6 +295,26 @@ export async function sendSms(body: SmsRequest | undefined): Promise<SmsResult> 
     await storeIdempotent("sms", dedupeHash, result, SEND_IDEMPOTENCY_TTL_SECONDS);
     return result;
   } catch (err) {
+    // Twilio error 21610 = "Attempt to send to unsubscribed recipient":
+    // the number opted out at the Twilio/carrier level (e.g. via a STOP
+    // that Messaging-Service Advanced Opt-Out intercepted before our
+    // /sms/incoming webhook ever saw it). Treat it exactly like our own
+    // suppression: sync it into our list so the VOICE path honors the
+    // opt-out too, and return the non-error sentinel so the hub treats the
+    // send as HANDLED rather than a retryable failure. Not cached
+    // (suppression is mutable — a later START must let a retry send).
+    if ((err as { code?: number }).code === 21610) {
+      log.info(
+        { to: maskPhoneNumber(to) },
+        "SMS send blocked by Twilio opt-out (21610) — syncing suppression",
+      );
+      try {
+        await suppress(to);
+      } catch {
+        /* best-effort sync; the sentinel below is what matters */
+      }
+      return { ok: true, status: 200, body: { sid: "suppressed" } };
+    }
     log.error({ err, to: maskPhoneNumber(to) }, "Failed to send SMS");
     // Deliberately NOT cached — transient Twilio failures should be
     // retryable on the same dedupeKey.
