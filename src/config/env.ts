@@ -163,6 +163,20 @@ export const env = {
   // <Play> audio. Twilio fetches within seconds; an hour is generous and
   // bounds how long a leaked render token stays live.
   voiceLineTtlSeconds: parseInt(optional("VOICE_LINE_TTL_SECONDS", "3600"), 10),
+  // Refuse to place a one-shot voice call unless the caller (the hub)
+  // attests, per request (`consent: true`), that explicit VOICE consent
+  // was captured for the destination. A prerecorded/robocall needs prior
+  // express consent that is DISTINCT from SMS opt-in (TCPA), and the hub —
+  // which owns identity + consent — is the system of record. Talk fails
+  // CLOSED here so a robocall can't go out un-attested. Defaults ON in
+  // production; override explicitly with REQUIRE_VOICE_CONSENT=true|false
+  // (e.g. set "true" in a staging smoke test, or "false" only with a
+  // documented compliance sign-off).
+  requireVoiceConsent:
+    (process.env.REQUIRE_VOICE_CONSENT ??
+      ((process.env.NODE_ENV || "development") === "production"
+        ? "true"
+        : "false")) === "true",
 
   // Twilio webhook signature validation (set to "true" to enable)
   validateTwilioSignature: optional("VALIDATE_TWILIO_SIGNATURE", "false"),

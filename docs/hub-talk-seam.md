@@ -136,7 +136,13 @@ registry secrets in the Vercel dashboard by hand.
 
 - A2P 10DLC brand + campaign on the number (trial/verified number for testing).
 - STOP/HELP/START handling, suppression list, quiet hours, frequency caps.
-- Separate explicit VOICE consent before outbound calls.
+- Separate explicit VOICE consent before outbound calls — enforced by the
+  `REQUIRE_VOICE_CONSENT` gate (the hub must send `consent: true` on
+  `/api/call/outbound`; talk 403s otherwise).
+- **Shared KV is required in production** (the suppression list +
+  idempotency are non-durable on the in-memory backend).
+
+Full operator runbook: [`docs/GO_LIVE-sms-voice-reminders.md`](./GO_LIVE-sms-voice-reminders.md).
 
 Full hub-side contract: `docs/plans/f7-talk-side-handoff.md` and
 `docs/plans/voice-auth-fallback.md` in the hub repo.

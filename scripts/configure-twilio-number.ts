@@ -1,11 +1,11 @@
 /**
  * scripts/configure-twilio-number.ts
  *
- * One-shot provisioner that points a Twilio number's voice webhook at
- * this app's /call/incoming endpoint. Use any time you add a new
- * number, change API_DOMAIN, or move the app between environments —
- * keeps the Twilio console out of the loop so the mapping is
- * reproducible across prod/staging.
+ * One-shot provisioner that points a Twilio number's voice AND SMS
+ * webhooks at this app. Use any time you add a new number, change
+ * API_DOMAIN, or move the app between environments — keeps the Twilio
+ * console out of the loop so the mapping is reproducible across
+ * prod/staging.
  *
  * USAGE:
  *   npm run configure:twilio -- +13143948500
@@ -15,9 +15,19 @@
  *   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN
  *   API_DOMAIN (or SERVER_DOMAIN)
  *
- * The voice webhook is set to https://$API_DOMAIN/call/incoming and
- * the status callback to https://$API_DOMAIN/call/status. Both are
- * configured as POST.
+ * Webhooks set (all POST):
+ *   voiceUrl       → https://$API_DOMAIN/call/incoming
+ *   statusCallback → https://$API_DOMAIN/call/status
+ *   smsUrl         → https://$API_DOMAIN/sms/incoming
+ *
+ * ⚠️  Messaging Service caveat: if this number is attached to an A2P
+ * Messaging Service (which it MUST be for compliant outbound SMS), the
+ * Messaging Service's *Integration → inbound request URL* overrides the
+ * number-level smsUrl this script sets. In that topology, point the
+ * Messaging Service inbound webhook at https://$API_DOMAIN/sms/incoming
+ * in the console (or via the Messaging Services API) instead — the
+ * number-level smsUrl set here is the fallback for numbers not in a
+ * service. See docs/GO_LIVE-sms-voice-reminders.md.
  */
 
 import "dotenv/config";
@@ -41,18 +51,28 @@ async function main(): Promise<void> {
 
   const voiceUrl = `https://${env.apiDomain}/call/incoming`;
   const statusCallback = `https://${env.apiDomain}/call/status`;
+  const smsUrl = `https://${env.apiDomain}/sms/incoming`;
 
   const updated = await client.incomingPhoneNumbers(number.sid).update({
     voiceUrl,
     voiceMethod: "POST",
     statusCallback,
     statusCallbackMethod: "POST",
+    smsUrl,
+    smsMethod: "POST",
   });
 
   console.log(`Configured ${updated.phoneNumber}`);
   console.log(`  sid:            ${updated.sid}`);
   console.log(`  voiceUrl:       ${updated.voiceUrl}`);
   console.log(`  statusCallback: ${updated.statusCallback}`);
+  console.log(`  smsUrl:         ${updated.smsUrl}`);
+  console.warn(
+    `\n  ⚠️  If ${updated.phoneNumber} is in an A2P Messaging Service, that ` +
+      `service's\n      inbound URL OVERRIDES the number-level smsUrl above. ` +
+      `Point the Messaging\n      Service inbound webhook at ${smsUrl} instead. ` +
+      `See docs/GO_LIVE-sms-voice-reminders.md.`,
+  );
 }
 
 main().catch((err) => {

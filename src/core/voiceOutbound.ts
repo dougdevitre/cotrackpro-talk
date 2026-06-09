@@ -183,6 +183,13 @@ export type VoiceOutboundRequest = {
   voiceId?: string;
   line?: string;
   dedupeKey?: string;
+  /**
+   * The hub's per-request attestation that explicit VOICE consent was
+   * captured for `to`. Required when env.requireVoiceConsent is on (prod
+   * default); absent/false → 403. See the REQUIRE_VOICE_CONSENT note in
+   * src/config/env.ts.
+   */
+  consent?: boolean;
 };
 
 export type VoiceOutboundResult =
@@ -200,7 +207,7 @@ export type VoiceOutboundResult =
     }
   | {
       ok: false;
-      status: 401 | 503;
+      status: 401 | 403 | 503;
       body: { error: string };
       headers?: Record<string, string>;
     }
@@ -333,6 +340,18 @@ export async function placeVoiceCall(
       status: 500,
       body: { error: "voice_unconfigured", details: "doug-voice is not provisioned" },
     };
+  }
+
+  // Voice-consent gate: refuse to place a robocall unless the hub
+  // attests explicit voice consent for this destination. Fails CLOSED
+  // (403) — NOT cached, so once the hub starts attesting, a retry of the
+  // same dedupeKey proceeds. See env.requireVoiceConsent.
+  if (env.requireVoiceConsent && body.consent !== true) {
+    log.warn(
+      { to: maskPhoneNumber(body.to) },
+      "Outbound voice refused — voice consent not attested",
+    );
+    return { ok: false, status: 403, body: { error: "voice_consent_required" } };
   }
 
   // Suppression: opted-out numbers are never called. Non-error sentinel
