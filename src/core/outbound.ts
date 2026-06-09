@@ -15,8 +15,8 @@ import { bearerMatches } from "./auth.js";
 import { validateDialable } from "./phoneValidation.js";
 import { normalizeRole } from "./enumValidation.js";
 import {
-  lookupIdempotent,
   parseIdempotencyKey,
+  replayIdempotent,
   storeIdempotent,
 } from "./idempotency.js";
 
@@ -258,24 +258,16 @@ export async function initiateOutboundCall(
   const idempotencyHash = keyParse.key;
 
   // Cache lookup. Hit → return cached result with X-Idempotent-Replay.
-  // Miss → proceed with the real work.
-  const lookup = await lookupIdempotent<OutboundResult>(
+  // Miss → proceed with the real work. (replayIdempotent does the
+  // defensive clone + header injection so the shared MemoryKv object
+  // reference is never mutated.)
+  const replay = await replayIdempotent<OutboundResult>(
     "outbound",
     idempotencyHash,
   );
-  if (lookup.hit) {
+  if (replay) {
     log.info({ idempotencyHash }, "Outbound call idempotent replay");
-    // Defensive clone + add replay header. We don't mutate the cached
-    // value because the KV MemoryKv backend shares the object
-    // reference across reads.
-    const cached = lookup.cachedValue;
-    return {
-      ...cached,
-      headers: {
-        ...(cached.headers ?? {}),
-        "X-Idempotent-Replay": "true",
-      },
-    } as OutboundResult;
+    return replay;
   }
 
   if (!body?.to) {

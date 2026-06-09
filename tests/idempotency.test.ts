@@ -15,6 +15,7 @@ import {
   parseIdempotencyKey,
   lookupIdempotent,
   storeIdempotent,
+  replayIdempotent,
 } from "../src/core/idempotency.js";
 import {
   _resetKvForTests,
@@ -175,6 +176,44 @@ describe("lookupIdempotent / storeIdempotent — round-trip", () => {
     // The MemoryKv expiry itself is covered in tests/kv.test.ts.
     const r = await lookupIdempotent("outbound", "ttl-key");
     assert.equal(r.hit, true);
+  });
+});
+
+describe("replayIdempotent — replay header injection", () => {
+  beforeEach(() => _setKvForTests(new MemoryKv()));
+
+  it("returns null on a miss (caller proceeds to do the work)", async () => {
+    assert.equal(await replayIdempotent("outbound", "no-such-key"), null);
+  });
+
+  it("returns null for a null key (idempotency disabled)", async () => {
+    assert.equal(await replayIdempotent("outbound", null), null);
+  });
+
+  it("on a hit, returns the stored body with X-Idempotent-Replay:true", async () => {
+    const stored = { ok: true, status: 200, body: { sid: "SM1" } };
+    await storeIdempotent("sms", "hit-key", stored);
+    const r = await replayIdempotent<typeof stored & { headers?: Record<string, string> }>(
+      "sms",
+      "hit-key",
+    );
+    assert.ok(r);
+    assert.deepEqual(r!.body, { sid: "SM1" });
+    assert.equal(r!.headers?.["X-Idempotent-Replay"], "true");
+  });
+
+  it("preserves and merges any headers the cached result already had", async () => {
+    const stored = {
+      ok: true,
+      status: 200,
+      body: { sid: "SM2" },
+      headers: { "X-Idempotent-Replay": "false", "X-Other": "keep" },
+    };
+    await storeIdempotent("sms", "hdr-key", stored);
+    const r = await replayIdempotent<typeof stored>("sms", "hdr-key");
+    // The replay flips false→true but keeps unrelated headers.
+    assert.equal(r!.headers?.["X-Idempotent-Replay"], "true");
+    assert.equal(r!.headers?.["X-Other"], "keep");
   });
 });
 

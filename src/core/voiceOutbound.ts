@@ -41,8 +41,8 @@ import { authorizeHubBearer } from "./auth.js";
 import { validateDialable } from "./phoneValidation.js";
 import { checkRateLimit, hashClientKey } from "./rateLimit.js";
 import {
-  lookupIdempotent,
   parseIdempotencyKey,
+  replayIdempotent,
   storeIdempotent,
 } from "./idempotency.js";
 import { isSuppressed } from "./consent.js";
@@ -286,14 +286,10 @@ export async function placeVoiceCall(
   const dedupeHash = keyParse.key;
 
   // Idempotency replay BEFORE any work so a retry returns the prior id.
-  const lookup = await lookupIdempotent<VoiceOutboundResult>("call", dedupeHash);
-  if (lookup.hit) {
+  const replay = await replayIdempotent<VoiceOutboundResult>("call", dedupeHash);
+  if (replay) {
     log.info({ dedupeHash }, "Outbound voice idempotent replay");
-    const cached = lookup.cachedValue;
-    return {
-      ...cached,
-      headers: { ...(cached.headers ?? {}), "X-Idempotent-Replay": "true" },
-    } as VoiceOutboundResult;
+    return replay;
   }
 
   if (!body?.to) {

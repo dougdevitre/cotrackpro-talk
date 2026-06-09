@@ -27,8 +27,8 @@ import { authorizeHubBearer } from "./auth.js";
 import { validateDialable } from "./phoneValidation.js";
 import { checkRateLimit, hashClientKey } from "./rateLimit.js";
 import {
-  lookupIdempotent,
   parseIdempotencyKey,
+  replayIdempotent,
   storeIdempotent,
 } from "./idempotency.js";
 import { isSuppressed } from "./consent.js";
@@ -219,14 +219,10 @@ export async function sendSms(body: SmsRequest | undefined): Promise<SmsResult> 
 
   // Idempotency replay BEFORE validation/work so a retry returns the
   // exact prior result.
-  const lookup = await lookupIdempotent<SmsResult>("sms", dedupeHash);
-  if (lookup.hit) {
+  const replay = await replayIdempotent<SmsResult>("sms", dedupeHash);
+  if (replay) {
     log.info({ dedupeHash }, "SMS send idempotent replay");
-    const cached = lookup.cachedValue;
-    return {
-      ...cached,
-      headers: { ...(cached.headers ?? {}), "X-Idempotent-Replay": "true" },
-    } as SmsResult;
+    return replay;
   }
 
   if (!body?.to) {
