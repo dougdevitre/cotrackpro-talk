@@ -13,6 +13,10 @@
  */
 
 import { timingSafeEqual } from "node:crypto";
+import { env } from "../config/env.js";
+import { logger } from "../utils/logger.js";
+
+const log = logger.child({ core: "auth" });
 
 /**
  * Constant-time match of a Bearer token against an expected value.
@@ -52,4 +56,49 @@ export function bearerMatches(
   if (a.length !== b.length) return false;
 
   return timingSafeEqual(a, b);
+}
+
+/**
+ * Outcome of authorizing a hub→talk call against the shared bearer.
+ * `null` means authorized; otherwise an error to map to an HTTP
+ * response.
+ *
+ * The status codes follow the talk-edge contract:
+ *   - 401 — bearer absent or wrong.
+ *   - 503 — the shared key is UNCONFIGURED on this deploy. We surface
+ *           "service unavailable" rather than 401 so the hub can tell
+ *           "you sent the wrong token" (401, won't retry) apart from
+ *           "talk isn't wired up yet" (503, transient/ops issue).
+ */
+export type HubBearerError = { status: 401 | 503; error: string };
+
+/**
+ * Authorize a hub→talk request carrying the shared bearer.
+ *
+ * Fails CLOSED in production when the key is unset (returns 503): an
+ * unauthenticated outbound SMS / voice endpoint is a direct path to
+ * Twilio spend fraud. Outside production we allow the unset escape
+ * hatch (returns null) so local dev / tests can run without the secret.
+ *
+ * @param authHeader  Raw Authorization header value.
+ * @param label       Endpoint name for the "unconfigured in prod" log.
+ */
+export function authorizeHubBearer(
+  authHeader: string | undefined,
+  label: string,
+): HubBearerError | null {
+  if (!env.outboundApiKey) {
+    if (env.nodeEnv === "production") {
+      log.error(
+        `Shared talk bearer (TALK_OUTBOUND_API_KEY) is unset in production — refusing ${label}.`,
+      );
+      return { status: 503, error: "service_unconfigured" };
+    }
+    return null; // auth disabled (non-prod escape hatch)
+  }
+
+  if (!bearerMatches(authHeader, env.outboundApiKey)) {
+    return { status: 401, error: "unauthorized" };
+  }
+  return null;
 }

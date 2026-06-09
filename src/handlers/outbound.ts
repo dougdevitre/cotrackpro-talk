@@ -1,11 +1,18 @@
 /**
- * handlers/outbound.ts — Outbound call initiation (Fastify adapter)
+ * handlers/outbound.ts — Interactive outbound call initiation (Fastify).
  *
- * Thin Fastify wrapper around src/core/outbound.ts. Vercel reuses the
- * same core in api/call/outbound.ts.
+ * Thin Fastify wrapper around src/core/outbound.ts. This is the
+ * INTERACTIVE variant: it dials a number and connects the callee to the
+ * bidirectional Media Stream voice loop.
  *
- * POST /call/outbound
+ * POST /call/outbound-interactive
  *   body: { to: "+15551234567", role?: "parent" }
+ *
+ * NOTE: the public Vercel path /call/outbound is now the hub's one-shot
+ * voice contract ({ to, voiceId, line, dedupeKey }, see
+ * api/call/outbound.ts + src/core/voiceOutbound.ts). This interactive
+ * path was relocated off /call/outbound to avoid colliding with that
+ * contract.
  */
 
 import type { FastifyInstance, FastifyReply } from "fastify";
@@ -27,7 +34,7 @@ function sendResult(reply: FastifyReply, result: OutboundResult): FastifyReply {
 }
 
 export function registerOutboundRoutes(app: FastifyInstance): void {
-  app.post("/call/outbound", async (request, reply) => {
+  app.post("/call/outbound-interactive", async (request, reply) => {
     const { result: authError, userId } = await authorizeOutbound(request.headers.authorization);
     if (authError) return sendResult(reply, authError);
     // Attach Clerk userId to request for downstream use (call records)

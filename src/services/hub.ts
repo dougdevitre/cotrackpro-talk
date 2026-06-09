@@ -168,6 +168,118 @@ export async function sendAuthLink(phone: string): Promise<SendAuthLinkResult> {
   });
 }
 
+// ── record-consent ────────────────────────────────────────────────────────────
+
+export type ConsentState = "opted_in" | "opted_out";
+
+export type RecordConsentResult =
+  /** 200 — hub recorded the consent change. */
+  | { status: "ok" }
+  /** 401 — our bearer was bad/missing. */
+  | { status: "unauthorized" }
+  /** 503 — hub deployed without a key (hub misconfig). */
+  | { status: "not_configured" }
+  /** 400 — we sent a malformed/invalid phone or state. */
+  | { status: "invalid" }
+  /** Hub disabled locally, network/timeout, or unexpected status. */
+  | { status: "error"; reason: string };
+
+/**
+ * Tell the hub a caller opted in/out via an SMS keyword (STOP/START).
+ *
+ *   POST {HUB_BASE_URL}/internal/v1/record-consent
+ *   Authorization: Bearer <shared talk key>
+ *   { "phone": "+1...", "state": "opted_out", "channel": "sms", "keyword": "STOP" }
+ *
+ * The talk edge is the source of truth for the suppression LIST (it owns
+ * the number); the hub records consent for its own audit/compliance. We
+ * call this best-effort AFTER updating our own suppression list, so a
+ * hub hiccup never leaves a user still receiving messages they stopped.
+ */
+export async function recordConsent(
+  phone: string,
+  state: ConsentState,
+  keyword?: string,
+): Promise<RecordConsentResult> {
+  const cfg = hubReady();
+  if (!cfg.ok) return { status: "error", reason: cfg.reason };
+
+  return hubPost(
+    "/internal/v1/record-consent",
+    { phone, state, channel: "sms", keyword },
+    (status) => {
+      switch (status) {
+        case 200:
+        case 204:
+          return { status: "ok" };
+        case 401:
+          log.error("record-consent 401 — talk bearer rejected by hub");
+          return { status: "unauthorized" };
+        case 503:
+          return { status: "not_configured" };
+        case 400:
+          return { status: "invalid" };
+        default:
+          return { status: "error", reason: `unexpected_status_${status}` };
+      }
+    },
+  );
+}
+
+// ── inbound-sms ───────────────────────────────────────────────────────────────
+
+export type InboundSmsResult =
+  /** 200 — hub handled it; `reply` (if present) should be sent as TwiML. */
+  | { status: "ok"; reply?: string }
+  /** 401 — our bearer was bad/missing. */
+  | { status: "unauthorized" }
+  /** 503 — hub misconfig. */
+  | { status: "not_configured" }
+  /** 400 — malformed payload. */
+  | { status: "invalid" }
+  /** Hub disabled locally, network/timeout, or unexpected status. */
+  | { status: "error"; reason: string };
+
+/**
+ * Forward a non-keyword inbound SMS to the hub and return any reply it
+ * wants delivered. The hub composes the reply text; the talk edge wraps
+ * it in TwiML (appending the canonical opt-out footer).
+ *
+ *   POST {HUB_BASE_URL}/internal/v1/inbound-sms
+ *   Authorization: Bearer <shared talk key>
+ *   { "from": "+1...", "to": "+1...", "body": "...", "messageSid": "SM..." }
+ */
+export async function forwardInboundSms(args: {
+  from: string;
+  to: string;
+  body: string;
+  messageSid?: string;
+}): Promise<InboundSmsResult> {
+  const cfg = hubReady();
+  if (!cfg.ok) return { status: "error", reason: cfg.reason };
+
+  return hubPost("/internal/v1/inbound-sms", { ...args }, (status, body) => {
+    switch (status) {
+      case 200: {
+        const reply =
+          typeof body?.reply === "string" && body.reply.length > 0
+            ? body.reply
+            : undefined;
+        return { status: "ok", reply };
+      }
+      case 401:
+        log.error("inbound-sms 401 — talk bearer rejected by hub");
+        return { status: "unauthorized" };
+      case 503:
+        return { status: "not_configured" };
+      case 400:
+        return { status: "invalid" };
+      default:
+        return { status: "error", reason: `unexpected_status_${status}` };
+    }
+  });
+}
+
 // ── Internals ─────────────────────────────────────────────────────────────────
 
 /** Whether the hub integration is configured enough to attempt a call. */

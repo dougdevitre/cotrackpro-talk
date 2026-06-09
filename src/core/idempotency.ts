@@ -151,6 +151,35 @@ export async function lookupIdempotent<T>(
 }
 
 /**
+ * Idempotency replay. On a cache hit, returns the stored result with
+ * `X-Idempotent-Replay: true` injected into its headers; on a miss (or
+ * a null key / KV error via lookupIdempotent's fail-open), returns null
+ * so the caller proceeds to do the work and storeIdempotent the terminal
+ * result itself.
+ *
+ * Centralizes the `{ ...cached, headers: { ...cached.headers, replay } }`
+ * spread + `as T` cast that was copy-pasted verbatim across the
+ * outbound-call, SMS-send, and outbound-voice cores — the most
+ * error-prone part of the pattern (a botched spread silently drops the
+ * cached body or the replay header). The conditional storeIdempotent
+ * calls stay at each call site because WHICH results are cached
+ * (deterministic 4xx yes, transient 5xx / mutable suppression no) is
+ * per-endpoint policy, not mechanical duplication.
+ */
+export async function replayIdempotent<T extends { headers?: Record<string, string> }>(
+  namespace: string,
+  hashedKey: string | null,
+): Promise<T | null> {
+  const lookup = await lookupIdempotent<T>(namespace, hashedKey);
+  if (!lookup.hit) return null;
+  const cached = lookup.cachedValue;
+  return {
+    ...cached,
+    headers: { ...(cached.headers ?? {}), "X-Idempotent-Replay": "true" },
+  } as T;
+}
+
+/**
  * Store an idempotency cache entry. No-op when the key is null
  * (client didn't send Idempotency-Key) or on KV error. We fail open
  * on KV errors: the actual work already succeeded, and failing the

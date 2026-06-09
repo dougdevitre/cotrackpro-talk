@@ -215,6 +215,47 @@ async function callElevenLabs(
   return { ok: true, audio: Buffer.from(arrayBuffer) };
 }
 
+/**
+ * One-shot ElevenLabs render to a complete audio buffer, reused by the
+ * outbound-voice <Play> path (api/call/voice-line.ts) — NOT just the
+ * Clerk-authed browser proxy. Returns the audio bytes + content type or
+ * a discriminated error; never throws.
+ *
+ * Injectable via `_setTtsRendererForTests` so the voice tests never hit
+ * ElevenLabs.
+ */
+export type TtsRenderResult =
+  | { ok: true; audio: Buffer; contentType: string }
+  | { ok: false; status: number };
+
+export type TtsRenderer = (
+  text: string,
+  voiceId: string,
+  outputFormat: string,
+) => Promise<TtsRenderResult>;
+
+let _rendererImpl: TtsRenderer | null = null;
+
+/** Test-only: inject a TTS renderer stub. Do not call in production. */
+export function _setTtsRendererForTests(impl: TtsRenderer | null): void {
+  _rendererImpl = impl;
+}
+
+export async function renderTtsAudio(
+  text: string,
+  voiceId: string,
+  outputFormat: string = env.elevenLabsTtsOutputFormat,
+): Promise<TtsRenderResult> {
+  if (_rendererImpl) return _rendererImpl(text, voiceId, outputFormat);
+  const result = await callElevenLabs(text, voiceId, outputFormat);
+  if (!result.ok) return { ok: false, status: result.status };
+  return {
+    ok: true,
+    audio: result.audio,
+    contentType: contentTypeForFormat(outputFormat),
+  };
+}
+
 export async function synthesizeTts(
   authHeader: string | undefined,
   body: TtsRequest | undefined,

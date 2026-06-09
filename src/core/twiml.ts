@@ -248,7 +248,11 @@ export function logIncomingCall(body: Record<string, string> | undefined): {
 } {
   const from = body?.From ?? "unknown";
   const callSid = body?.CallSid ?? "unknown";
-  log.info({ from, callSid }, "Incoming call");
+  // Mask the caller's number in the log line (PII) but return the raw
+  // value — callers need the real E.164 to resolve the caller against the
+  // hub. Mirrors the masking on the resolveInboundCaller / inbound-SMS
+  // paths so no inbound surface logs a raw subscriber number.
+  log.info({ from: maskPhoneNumber(from), callSid }, "Incoming call");
   return { from, callSid };
 }
 

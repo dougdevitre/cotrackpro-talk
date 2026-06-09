@@ -23,17 +23,25 @@
 import twilio from "twilio";
 import { env } from "../config/env.js";
 import { logger } from "../utils/logger.js";
-import { bearerMatches } from "./auth.js";
+import { authorizeHubBearer } from "./auth.js";
 import { validateDialable } from "./phoneValidation.js";
 import { checkRateLimit, hashClientKey } from "./rateLimit.js";
 import {
-  lookupIdempotent,
   parseIdempotencyKey,
+  replayIdempotent,
   storeIdempotent,
 } from "./idempotency.js";
+import { isSuppressed } from "./consent.js";
 import { maskPhoneNumber } from "../services/dynamo.js";
 
 const log = logger.child({ core: "sms" });
+
+/**
+ * Idempotency TTL for sends. The dedupeKey must dedupe a hub retry for
+ * far longer than the 24h HTTP default — reminder sends can be retried
+ * days later — so we hold the sent-record for 30 days.
+ */
+const SEND_IDEMPOTENCY_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 // ── Twilio sender (injectable for tests) ──────────────────────────────────────
 //
@@ -117,6 +125,12 @@ export type SmsResult =
     }
   | {
       ok: false;
+      status: 503;
+      body: { error: string };
+      headers?: Record<string, string>;
+    }
+  | {
+      ok: false;
       status: 429;
       body: { error: string; details?: string; retryAfterSeconds: number };
       headers: Record<string, string>;
@@ -131,36 +145,16 @@ export type SmsResult =
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
 /**
- * Verify the shared hub↔talk bearer (constant-time). Returns null on
- * success or a 401/500 SmsResult to return verbatim.
- *
- * Fails CLOSED in production when the key is unset: an unauth'd
- * /api/sms/send is a direct path to Twilio SMS-spend fraud, exactly like
- * /call/outbound. Outside production we allow the unset escape hatch for
- * local dev.
+ * Verify the shared hub↔talk bearer (constant-time) via the shared
+ * authorizeHubBearer helper. Returns null on success, or a 401 (bearer
+ * absent/wrong) / 503 (key unconfigured in prod) SmsResult to return
+ * verbatim. Outside production an unset key is the local-dev escape
+ * hatch (returns null).
  */
 export function authorizeInboundSms(authHeader: string | undefined): SmsResult | null {
-  if (!env.outboundApiKey) {
-    if (env.nodeEnv === "production") {
-      log.error(
-        "OUTBOUND_API_KEY (shared talk bearer) is unset in production — refusing /api/sms/send.",
-      );
-      return {
-        ok: false,
-        status: 500,
-        body: {
-          error: "Server misconfigured",
-          details: "OUTBOUND_API_KEY is required in production",
-        },
-      };
-    }
-    return null; // auth disabled (non-prod escape hatch)
-  }
-
-  if (!bearerMatches(authHeader, env.outboundApiKey)) {
-    return { ok: false, status: 401, body: { error: "unauthorized" } };
-  }
-  return null;
+  const err = authorizeHubBearer(authHeader, "/api/sms/send");
+  if (!err) return null;
+  return { ok: false, status: err.status, body: { error: err.error } };
 }
 
 /** Rate-limit keyed on the presented bearer (hashed). Mirrors outbound. */
@@ -209,23 +203,26 @@ export async function checkSmsRateLimit(
  * E.164 number in the allow-list before touching Twilio.
  */
 export async function sendSms(body: SmsRequest | undefined): Promise<SmsResult> {
+  // dedupeKey is REQUIRED: it's the idempotency key, and the endpoint's
+  // retry-safety guarantee (a hub retry never double-sends) only holds
+  // when it's present. A missing key is a contract violation, not an
+  // opt-out of idempotency — fail closed with 400.
+  if (!body?.dedupeKey) {
+    return { ok: false, status: 400, body: { error: "missing 'dedupeKey'" } };
+  }
   // dedupeKey runs through the same validation as the Idempotency-Key
   // header (length + printable-ASCII) so the hub can't smuggle a giant
   // or control-char-laden key into Redis key names.
-  const keyParse = parseIdempotencyKey(body?.dedupeKey);
+  const keyParse = parseIdempotencyKey(body.dedupeKey);
   if (!keyParse.ok) return keyParse;
   const dedupeHash = keyParse.key;
 
   // Idempotency replay BEFORE validation/work so a retry returns the
   // exact prior result.
-  const lookup = await lookupIdempotent<SmsResult>("sms", dedupeHash);
-  if (lookup.hit) {
+  const replay = await replayIdempotent<SmsResult>("sms", dedupeHash);
+  if (replay) {
     log.info({ dedupeHash }, "SMS send idempotent replay");
-    const cached = lookup.cachedValue;
-    return {
-      ...cached,
-      headers: { ...(cached.headers ?? {}), "X-Idempotent-Replay": "true" },
-    } as SmsResult;
+    return replay;
   }
 
   if (!body?.to) {
@@ -248,8 +245,21 @@ export async function sendSms(body: SmsRequest | undefined): Promise<SmsResult> 
     };
     // Cache the deterministic 400 — same bad input always fails the same
     // way; don't let retries burn rate-limit budget re-validating.
-    await storeIdempotent("sms", dedupeHash, result);
+    await storeIdempotent("sms", dedupeHash, result, SEND_IDEMPOTENCY_TTL_SECONDS);
     return result;
+  }
+
+  // Suppression: if the destination has opted out (replied STOP), do NOT
+  // send. Return a non-error sentinel so the hub treats the send as
+  // HANDLED (not a failure to retry) — the message is simply suppressed.
+  // Cached under the dedupeKey so replays stay consistent.
+  if (await isSuppressed(body.to)) {
+    log.info({ to: maskPhoneNumber(body.to) }, "SMS send suppressed (opted out)");
+    // Deliberately NOT cached: suppression is mutable. If the number later
+    // replies START (opts back in) and the hub retries the SAME dedupeKey,
+    // we must re-check isSuppressed and actually send — a cached
+    // "suppressed" would silently swallow that message for up to 30 days.
+    return { ok: true, status: 200, body: { sid: "suppressed" } };
   }
 
   // A2P enforcement: in production we refuse to send without a Messaging
@@ -282,7 +292,7 @@ export async function sendSms(body: SmsRequest | undefined): Promise<SmsResult> 
       body: { sid },
       headers: dedupeHash ? { "X-Idempotent-Replay": "false" } : undefined,
     };
-    await storeIdempotent("sms", dedupeHash, result);
+    await storeIdempotent("sms", dedupeHash, result, SEND_IDEMPOTENCY_TTL_SECONDS);
     return result;
   } catch (err) {
     log.error({ err, to: maskPhoneNumber(to) }, "Failed to send SMS");
