@@ -100,7 +100,7 @@ Set on Vercel (or via your env pipeline) for the stage:
 | Var | Recommended | Purpose |
 |-----|-------------|---------|
 | `HUB_BASE_URL` | prod hub URL (no trailing slash) | talk → hub calls |
-| `REQUIRE_VOICE_CONSENT` | `true` | gate robocalls on hub-attested consent (Step 8) |
+| `REQUIRE_VOICE_CONSENT` | **leave unset (off)** | Voice consent is enforced HUB-SIDE; the hub sends no `consent` field, so turning this on 403s every call. |
 | `CALL_DAILY_CAP` | `50` (tune) | hard per-day outbound-voice cap |
 | `VOICE_LINE_TTL_SECONDS` | `3600` | pending-render pointer TTL |
 | `SMS_RATE_LIMIT_PER_MIN` / `_PER_HOUR` | `30` / `500` | SMS send caps |
@@ -168,16 +168,17 @@ to a service).
 
 ## Step 8 — Verify the hub contract
 
-The talk → hub calls were built to these shapes; confirm the hub matches
-before enabling traffic (`src/services/hub.ts`):
+The talk → hub calls are pinned to the **verified** hub contract
+(reconciled against the hub source 2026-06-09, `src/services/hub.ts`):
 
-- `POST /internal/v1/record-consent` ← `{ phone, state:"opted_in"|"opted_out", channel:"sms", keyword }`
-- `POST /internal/v1/inbound-sms` ← `{ from, to, body, messageSid }` → `{ reply? }`
+- `POST /internal/v1/record-consent` ← `{ phone, consent:"opted_in"|"opted_out" }`
+  (the field is **`consent`**, not `state`; extra keys ignored) → `{ ok, state }`
+- `POST /internal/v1/inbound-sms` ← `{ phone, keyword }` (sender as `phone`,
+  first word as `keyword`) → `{ reply? }`, or **`404 not_linked`**
 - The hub **always sends `dedupeKey`** on `/api/sms/send` and
-  `/api/call/outbound` (both now 400 without it).
-- The hub **sends `consent: true`** on `/api/call/outbound` once it has
-  captured voice consent. With `REQUIRE_VOICE_CONSENT=true`, voice calls
-  403 (`voice_consent_required`) until it does — fail-closed by design.
+  `/api/call/outbound` (both 400 without it).
+- `/api/call/outbound` carries **no `consent` field** — voice consent is
+  enforced hub-side, so `REQUIRE_VOICE_CONSENT` stays **off** (Step 3).
 
 ## Step 9 — Live smoke test
 
@@ -209,10 +210,10 @@ never log the body/line — correlate on `messageSid` / `dedupeHash` /
 
 ## Rollback
 
-- **Disable voice** without a deploy: `REQUIRE_VOICE_CONSENT=true` plus a
-  hub that stops sending `consent:true` → every voice call 403s (no
-  calls placed). Or set `CALL_DAILY_CAP=0` to hard-stop voice via the
-  rate limiter.
+- **Disable voice** without a deploy: set `CALL_DAILY_CAP=0` to hard-stop
+  outbound voice via the rate limiter. (Alternatively, if the hub starts
+  sending a `consent` field, `REQUIRE_VOICE_CONSENT=true` would gate on it
+  — but by default that field is absent and the gate stays off.)
 - **Disable SMS send/inbound**: point the Twilio webhook away or unset
   the Messaging Service SID (prod then fails closed on send).
 - The endpoints are additive — reverting this branch removes them

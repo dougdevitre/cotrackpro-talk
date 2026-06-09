@@ -61,7 +61,7 @@ describe("/sms/incoming — STOP", () => {
     // record-consent called with opted_out.
     const consentCall = captured.find((c) => c.url.endsWith("/internal/v1/record-consent"));
     assert.ok(consentCall, "record-consent should be called");
-    assert.equal(JSON.parse(consentCall!.init.body as string).state, "opted_out");
+    assert.equal(JSON.parse(consentCall!.init.body as string).consent, "opted_out");
 
     // Reply is a TwiML <Message>.
     assert.match(getBody(), /<Message>/);
@@ -82,7 +82,7 @@ describe("/sms/incoming — START", () => {
     assert.equal(await isSuppressed("+15551230123"), false);
     const consentCall = captured.find((c) => c.url.endsWith("/internal/v1/record-consent"));
     assert.ok(consentCall);
-    assert.equal(JSON.parse(consentCall!.init.body as string).state, "opted_in");
+    assert.equal(JSON.parse(consentCall!.init.body as string).consent, "opted_in");
   });
 });
 
@@ -104,7 +104,7 @@ describe("/sms/incoming — Twilio Advanced Opt-Out (OptOutType)", () => {
     assert.equal(await isSuppressed("+15551230123"), true);
     const consent = captured.find((c) => c.url.endsWith("/internal/v1/record-consent"));
     assert.ok(consent);
-    assert.equal(JSON.parse(consent!.init.body as string).state, "opted_out");
+    assert.equal(JSON.parse(consent!.init.body as string).consent, "opted_out");
     // Twilio already replied → we must NOT send a second <Message>.
     assert.doesNotMatch(getBody(), /<Message>/);
   });
@@ -161,10 +161,23 @@ describe("/sms/incoming — non-keyword forward", () => {
     assert.equal(getStatus(), 200);
     const fwd = captured.find((c) => c.url.endsWith("/internal/v1/inbound-sms"));
     assert.ok(fwd, "inbound-sms should be called");
+    // Hub contract: { phone: <sender>, keyword: <first word> } — NOT
+    // { from, to, body, messageSid }.
+    const fwdBody = JSON.parse(fwd!.init.body as string);
+    assert.deepEqual(fwdBody, { phone: "+15551230123", keyword: "Can" });
 
     const xml = getBody();
     assert.match(xml, /Thanks — rescheduled to 2pm\./);
     assert.equal(xml.split(OPT_OUT_FOOTER).length - 1, 1, "exactly one footer");
+  });
+
+  it("returns empty TwiML (no reply) when the hub 404s the number as not_linked", async () => {
+    _setHubFetchForTests(stubFetch(404, { error: "not_linked" }));
+    const req = smsReq({ From: "+15551230123", To: "+15559990000", Body: "DEADLINES" });
+    const { res, getStatus, getBody } = mockResponse();
+    await incomingSms(req, res);
+    assert.equal(getStatus(), 200);
+    assert.doesNotMatch(getBody(), /<Message>/);
   });
 
   it("forwards a bare 'Yes' to the hub (not treated as opt-in)", async () => {

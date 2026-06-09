@@ -163,20 +163,14 @@ export const env = {
   // <Play> audio. Twilio fetches within seconds; an hour is generous and
   // bounds how long a leaked render token stays live.
   voiceLineTtlSeconds: parseInt(optional("VOICE_LINE_TTL_SECONDS", "3600"), 10),
-  // Refuse to place a one-shot voice call unless the caller (the hub)
-  // attests, per request (`consent: true`), that explicit VOICE consent
-  // was captured for the destination. A prerecorded/robocall needs prior
-  // express consent that is DISTINCT from SMS opt-in (TCPA), and the hub —
-  // which owns identity + consent — is the system of record. Talk fails
-  // CLOSED here so a robocall can't go out un-attested. Defaults ON in
-  // production; override explicitly with REQUIRE_VOICE_CONSENT=true|false
-  // (e.g. set "true" in a staging smoke test, or "false" only with a
-  // documented compliance sign-off).
-  requireVoiceConsent:
-    (process.env.REQUIRE_VOICE_CONSENT ??
-      ((process.env.NODE_ENV || "development") === "production"
-        ? "true"
-        : "false")) === "true",
+  // Optional talk-side voice-consent gate. DEFAULT OFF — per the verified
+  // hub contract, voice consent is enforced HUB-SIDE (in `isAllowedNow`)
+  // and the hub sends NO `consent` field on /api/call/outbound, so gating
+  // on it here would 403 every legitimate call. Left as an opt-in
+  // defense-in-depth switch (REQUIRE_VOICE_CONSENT=true) for deployments
+  // that also want talk to refuse calls lacking a per-request `consent:
+  // true` attestation; keep it OFF unless the hub is sending that field.
+  requireVoiceConsent: (process.env.REQUIRE_VOICE_CONSENT ?? "false") === "true",
 
   // Twilio webhook signature validation (set to "true" to enable)
   validateTwilioSignature: optional("VALIDATE_TWILIO_SIGNATURE", "false"),

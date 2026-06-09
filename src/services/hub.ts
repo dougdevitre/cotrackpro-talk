@@ -189,7 +189,12 @@ export type RecordConsentResult =
  *
  *   POST {HUB_BASE_URL}/internal/v1/record-consent
  *   Authorization: Bearer <shared talk key>
- *   { "phone": "+1...", "state": "opted_out", "channel": "sms", "keyword": "STOP" }
+ *   { "phone": "+1...", "consent": "opted_out" }
+ *
+ * The hub field is **`consent`** (NOT `state`) — verified against the hub
+ * source (cotrackpro/src/handler.ts). Extra keys (`keyword`) are ignored
+ * by the hub but kept for log/debug parity. The response echoes `{ ok,
+ * state }`.
  *
  * The talk edge is the source of truth for the suppression LIST (it owns
  * the number); the hub records consent for its own audit/compliance. We
@@ -198,7 +203,7 @@ export type RecordConsentResult =
  */
 export async function recordConsent(
   phone: string,
-  state: ConsentState,
+  consent: ConsentState,
   keyword?: string,
 ): Promise<RecordConsentResult> {
   const cfg = hubReady();
@@ -206,7 +211,7 @@ export async function recordConsent(
 
   return hubPost(
     "/internal/v1/record-consent",
-    { phone, state, channel: "sms", keyword },
+    { phone, consent, keyword },
     (status) => {
       switch (status) {
         case 200:
@@ -231,6 +236,8 @@ export async function recordConsent(
 export type InboundSmsResult =
   /** 200 — hub handled it; `reply` (if present) should be sent as TwiML. */
   | { status: "ok"; reply?: string }
+  /** 404 — the sender's number isn't linked to an account. No reply. */
+  | { status: "not_linked" }
   /** 401 — our bearer was bad/missing. */
   | { status: "unauthorized" }
   /** 503 — hub misconfig. */
@@ -247,37 +254,47 @@ export type InboundSmsResult =
  *
  *   POST {HUB_BASE_URL}/internal/v1/inbound-sms
  *   Authorization: Bearer <shared talk key>
- *   { "from": "+1...", "to": "+1...", "body": "...", "messageSid": "SM..." }
+ *   { "phone": "+1...", "keyword": "DEADLINES" }
+ *
+ * The hub contract is **`{ phone, keyword }`** (verified against the hub
+ * source) — `phone` is the sender, `keyword` is the FIRST word of the
+ * message (the hub trims/upper-cases it and routes RESOURCES/SAFE,
+ * DEADLINES, LOG, CONFIRM, SNOOZE, else a default menu). It is NOT
+ * `{ from, to, body, messageSid }`. A `404` means the number isn't linked.
  */
 export async function forwardInboundSms(args: {
-  from: string;
-  to: string;
-  body: string;
-  messageSid?: string;
+  phone: string;
+  keyword: string;
 }): Promise<InboundSmsResult> {
   const cfg = hubReady();
   if (!cfg.ok) return { status: "error", reason: cfg.reason };
 
-  return hubPost("/internal/v1/inbound-sms", { ...args }, (status, body) => {
-    switch (status) {
-      case 200: {
-        const reply =
-          typeof body?.reply === "string" && body.reply.length > 0
-            ? body.reply
-            : undefined;
-        return { status: "ok", reply };
+  return hubPost(
+    "/internal/v1/inbound-sms",
+    { phone: args.phone, keyword: args.keyword },
+    (status, body) => {
+      switch (status) {
+        case 200: {
+          const reply =
+            typeof body?.reply === "string" && body.reply.length > 0
+              ? body.reply
+              : undefined;
+          return { status: "ok", reply };
+        }
+        case 404:
+          return { status: "not_linked" };
+        case 401:
+          log.error("inbound-sms 401 — talk bearer rejected by hub");
+          return { status: "unauthorized" };
+        case 503:
+          return { status: "not_configured" };
+        case 400:
+          return { status: "invalid" };
+        default:
+          return { status: "error", reason: `unexpected_status_${status}` };
       }
-      case 401:
-        log.error("inbound-sms 401 — talk bearer rejected by hub");
-        return { status: "unauthorized" };
-      case 503:
-        return { status: "not_configured" };
-      case 400:
-        return { status: "invalid" };
-      default:
-        return { status: "error", reason: `unexpected_status_${status}` };
-    }
-  });
+    },
+  );
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────

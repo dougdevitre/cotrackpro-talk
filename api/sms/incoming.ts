@@ -77,7 +77,6 @@ export default async function handler(
   }
 
   const from = body.From ?? "";
-  const to = body.To ?? "";
   const messageSid = body.MessageSid;
   const keyword = classifyKeyword(body.Body);
 
@@ -137,8 +136,13 @@ export default async function handler(
     return;
   }
 
-  // Non-keyword: forward to the hub and relay its reply (with footer).
-  const forwarded = await forwardInboundSms({ from, to, body: body.Body ?? "", messageSid });
+  // Non-keyword: forward to the hub as { phone, keyword } — the hub is
+  // keyword-routed (RESOURCES/SAFE, DEADLINES, LOG, CONFIRM, SNOOZE, else a
+  // default menu), so it wants the SENDER as `phone` and the FIRST word as
+  // `keyword`. Relay its reply with the canonical footer; a 404 (number not
+  // linked) → no reply.
+  const firstWord = (body.Body ?? "").trim().split(/\s+/)[0] ?? "";
+  const forwarded = await forwardInboundSms({ phone: from, keyword: firstWord });
   const reply =
     forwarded.status === "ok" && forwarded.reply
       ? appendFooterOnce(forwarded.reply)

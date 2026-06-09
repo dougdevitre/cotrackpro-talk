@@ -12,6 +12,8 @@ import assert from "node:assert/strict";
 import {
   resolvePhone,
   sendAuthLink,
+  recordConsent,
+  forwardInboundSms,
   _setHubFetchForTests,
 } from "../src/services/hub.js";
 
@@ -133,5 +135,53 @@ describe("sendAuthLink", () => {
     assert.deepEqual(await sendAuthLink("+1"), { status: "invalid" });
     _setHubFetchForTests(stubFetch(401, { error: "unauthorized" }));
     assert.deepEqual(await sendAuthLink("+15551230123"), { status: "unauthorized" });
+  });
+});
+
+describe("recordConsent", () => {
+  it("sends the consent under the `consent` key (NOT `state`)", async () => {
+    const captured: Captured[] = [];
+    _setHubFetchForTests(stubFetch(200, { ok: true, state: "opted_out" }, captured));
+
+    const r = await recordConsent("+15551230123", "opted_out", "STOP");
+    assert.deepEqual(r, { status: "ok" });
+
+    const { url, init } = captured[0];
+    assert.equal(url, "https://hub.test.example.com/internal/v1/record-consent");
+    const sent = JSON.parse(init.body as string);
+    assert.equal(sent.consent, "opted_out", "hub reads `consent`, not `state`");
+    assert.equal(sent.state, undefined);
+    assert.equal(sent.phone, "+15551230123");
+  });
+
+  it("maps 401 → unauthorized", async () => {
+    _setHubFetchForTests(stubFetch(401, { error: "unauthorized" }));
+    assert.deepEqual(await recordConsent("+15551230123", "opted_in"), {
+      status: "unauthorized",
+    });
+  });
+});
+
+describe("forwardInboundSms", () => {
+  it("sends { phone, keyword } (NOT { from, to, body, messageSid }) and returns the reply", async () => {
+    const captured: Captured[] = [];
+    _setHubFetchForTests(stubFetch(200, { reply: "Your next deadline is Friday." }, captured));
+
+    const r = await forwardInboundSms({ phone: "+15551230123", keyword: "DEADLINES" });
+    assert.deepEqual(r, { status: "ok", reply: "Your next deadline is Friday." });
+
+    const { url, init } = captured[0];
+    assert.equal(url, "https://hub.test.example.com/internal/v1/inbound-sms");
+    assert.deepEqual(JSON.parse(init.body as string), {
+      phone: "+15551230123",
+      keyword: "DEADLINES",
+    });
+  });
+
+  it("maps 404 → not_linked", async () => {
+    _setHubFetchForTests(stubFetch(404, { error: "not_linked" }));
+    assert.deepEqual(await forwardInboundSms({ phone: "+15551230123", keyword: "hi" }), {
+      status: "not_linked",
+    });
   });
 });
