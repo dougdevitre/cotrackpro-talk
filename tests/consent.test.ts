@@ -27,13 +27,15 @@ describe("classifyKeyword", () => {
   for (const w of ["STOP", "stop", "Stop.", "  STOP  ", "UNSUBSCRIBE", "cancel", "END", "QUIT", "stop please"]) {
     it(`classifies "${w}" as stop`, () => assert.equal(classifyKeyword(w), "stop"));
   }
-  for (const w of ["START", "start", "UNSTOP", "yes"]) {
+  for (const w of ["START", "start", "UNSTOP"]) {
     it(`classifies "${w}" as start`, () => assert.equal(classifyKeyword(w), "start"));
   }
   for (const w of ["HELP", "help", "INFO", "info"]) {
     it(`classifies "${w}" as help`, () => assert.equal(classifyKeyword(w), "help"));
   }
-  for (const w of ["hello", "I need to reschedule", "", "  ", "stopwatch please... "]) {
+  // "yes" is a conversational answer, NOT a carrier opt-in keyword — it
+  // must fall through to forwarding so the hub sees the user's reply.
+  for (const w of ["hello", "I need to reschedule", "", "  ", "stopwatch please... ", "yes", "Yes", "YES please"]) {
     it(`treats "${w}" as a non-keyword (null)`, () =>
       assert.equal(classifyKeyword(w), null));
   }

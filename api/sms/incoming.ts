@@ -83,6 +83,16 @@ export default async function handler(
 
   log.info({ messageSid, keyword: keyword ?? "none" }, "Inbound SMS");
 
+  // Guard a missing/blank From: suppressing or recording consent against
+  // an empty key would write a junk suppression entry (under hash("")) and
+  // never actually opt the real subscriber out/in. A well-formed Twilio
+  // webhook always carries From; bail to empty TwiML if it doesn't.
+  if (!from) {
+    log.warn({ messageSid }, "Inbound SMS with no From — ignoring");
+    sendXml(res, 200, twimlMessage(undefined));
+    return;
+  }
+
   if (keyword === "stop") {
     // Suppress FIRST (talk owns the number), then best-effort record
     // consent with the hub so a hub hiccup never leaves us still sending.

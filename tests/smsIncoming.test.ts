@@ -124,6 +124,22 @@ describe("/sms/incoming — non-keyword forward", () => {
     assert.equal(xml.split(OPT_OUT_FOOTER).length - 1, 1, "exactly one footer");
   });
 
+  it("forwards a bare 'Yes' to the hub (not treated as opt-in)", async () => {
+    const captured: Captured[] = [];
+    _setHubFetchForTests(stubFetch(200, { reply: "Got it." }, captured));
+
+    const req = smsReq({ From: "+15551230123", To: "+15559990000", Body: "Yes" });
+    const { res, getStatus } = mockResponse();
+    await incomingSms(req, res);
+
+    assert.equal(getStatus(), 200);
+    assert.ok(
+      captured.find((c) => c.url.endsWith("/internal/v1/inbound-sms")),
+      "a conversational 'Yes' must be forwarded, not consumed as START",
+    );
+    assert.equal(await isSuppressed("+15551230123"), false);
+  });
+
   it("returns empty TwiML when the hub has no reply", async () => {
     _setHubFetchForTests(stubFetch(200, {}));
     const req = smsReq({ From: "+15551230123", To: "+15559990000", Body: "hello there" });

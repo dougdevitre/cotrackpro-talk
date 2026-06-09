@@ -23,15 +23,20 @@
  * PII: this module never logs the raw phone number or message body.
  */
 
+import { createHash } from "node:crypto";
 import { kv } from "../services/kv.js";
-import { hashClientKey } from "./rateLimit.js";
 
 export type SmsKeyword = "stop" | "start" | "help";
 
 /** Carrier-standard opt-out keywords (Twilio Advanced Opt-Out set). */
 const STOP_WORDS = new Set(["STOP", "UNSUBSCRIBE", "CANCEL", "END", "QUIT"]);
-/** Opt-back-in keywords. */
-const START_WORDS = new Set(["START", "UNSTOP", "YES"]);
+/**
+ * Opt-back-in keywords. Deliberately the carrier-standard set ONLY —
+ * "YES" is NOT included: it's a common conversational answer to a hub
+ * prompt ("Are you available Thursday?" → "Yes"), and treating it as an
+ * opt-in would swallow that reply and never forward it to the hub.
+ */
+const START_WORDS = new Set(["START", "UNSTOP"]);
 /** Help keywords. */
 const HELP_WORDS = new Set(["HELP", "INFO"]);
 
@@ -91,8 +96,20 @@ export function appendFooterOnce(body: string): string {
 
 // ── Suppression list ──────────────────────────────────────────────────────────
 
+/**
+ * KV key for a number's suppression state. We hash the phone so the raw
+ * PII never lands in a Redis key name, but use SHA-256 (truncated to 128
+ * bits) rather than the 32-bit FNV-1a `hashClientKey` used for rate-limit
+ * buckets: a suppression list is a HIGH-cardinality, compliance-critical
+ * namespace where a hash collision would silently suppress (or, via
+ * START, re-enable) a DIFFERENT subscriber's number. 32-bit FNV-1a hits
+ * its birthday bound around ~65k numbers and is trivially collidable for
+ * a chosen target (keyless, public algorithm); 128-bit SHA-256 pushes
+ * that far out of reach. (See the M-4 note in src/core/rateLimit.ts.)
+ */
 function suppressionKey(phone: string): string {
-  return `sms:stop:${hashClientKey(phone)}`;
+  const h = createHash("sha256").update(phone).digest("hex").slice(0, 32);
+  return `sms:stop:${h}`;
 }
 
 /** Whether this number has opted out. Fails OPEN-CLOSED-safe: on a KV

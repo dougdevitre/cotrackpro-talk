@@ -23,7 +23,7 @@ import {
   _MemoryKvForTests as MemoryKv,
 } from "../src/services/kv.js";
 import { _resetPhoneValidationCacheForTests } from "../src/core/phoneValidation.js";
-import { suppress, OPT_OUT_FOOTER } from "../src/core/consent.js";
+import { suppress, unsuppress, OPT_OUT_FOOTER } from "../src/core/consent.js";
 
 beforeEach(() => {
   // Fresh KV per test so idempotency + rate-limit state doesn't leak.
@@ -63,18 +63,24 @@ describe("buildSmsCreateParams — A2P attribution", () => {
 });
 
 describe("sendSms — validation", () => {
+  it("400 on missing 'dedupeKey' (required for retry-safety)", async () => {
+    const r = await sendSms({ to: "+15551230123", body: "hi" });
+    assert.equal(r.status, 400);
+    if (!r.ok) assert.match(r.body.error, /dedupeKey/);
+  });
+
   it("400 on missing 'to'", async () => {
-    const r = await sendSms({ body: "hi" });
+    const r = await sendSms({ body: "hi", dedupeKey: "k" });
     assert.equal(r.status, 400);
   });
 
   it("400 on missing 'body'", async () => {
-    const r = await sendSms({ to: "+15551230123" });
+    const r = await sendSms({ to: "+15551230123", dedupeKey: "k" });
     assert.equal(r.status, 400);
   });
 
   it("400 on a non-E.164 / disallowed destination", async () => {
-    const r = await sendSms({ to: "5551230123", body: "hi" });
+    const r = await sendSms({ to: "5551230123", body: "hi", dedupeKey: "k" });
     assert.equal(r.status, 400);
     if (!r.ok) assert.match(r.body.error, /invalid 'to'/);
   });
@@ -94,6 +100,7 @@ describe("sendSms — send + idempotency", () => {
     const r = await sendSms({
       to: "+15551230123",
       body: "your sign-in link: https://example.com/x",
+      dedupeKey: "send-1",
     });
     assert.equal(r.status, 200);
     if (r.ok) assert.equal(r.body.sid, "SM_test_1");
@@ -157,6 +164,27 @@ describe("sendSms — suppression", () => {
     assert.equal(r.status, 200);
     if (r.ok) assert.equal(r.body.sid, "suppressed");
     assert.equal(calls, 0, "Twilio sender must not be invoked");
+  });
+
+  it("does NOT cache the suppressed sentinel — a retry after opt-in actually sends", async () => {
+    let calls = 0;
+    _setSmsSenderForTests(async () => {
+      calls++;
+      return { sid: "SM_after_optin" };
+    });
+    await suppress("+15551230123");
+
+    // First attempt while suppressed → sentinel, no send.
+    const first = await sendSms({ to: "+15551230123", body: "hi", dedupeKey: "reuse-1" });
+    assert.equal(first.ok && first.body.sid, "suppressed");
+    assert.equal(calls, 0);
+
+    // User opts back in; hub retries the SAME dedupeKey.
+    await unsuppress("+15551230123");
+    const second = await sendSms({ to: "+15551230123", body: "hi", dedupeKey: "reuse-1" });
+    assert.equal(second.status, 200);
+    if (second.ok) assert.equal(second.body.sid, "SM_after_optin");
+    assert.equal(calls, 1, "the opted-in retry must reach Twilio, not replay 'suppressed'");
   });
 
   it("still sends to a number that is NOT suppressed", async () => {

@@ -50,24 +50,30 @@ describe("authorizeVoiceOutbound", () => {
 });
 
 describe("placeVoiceCall — validation", () => {
+  it("400 on missing 'dedupeKey' (required for retry-safety)", async () => {
+    const r = await placeVoiceCall({ to: "+15551230123", voiceId: "doug-voice", line: "hi" });
+    assert.equal(r.status, 400);
+    if (!r.ok) assert.match(r.body.error, /dedupeKey/);
+  });
+
   it("400 on missing 'to'", async () => {
-    const r = await placeVoiceCall({ voiceId: "doug-voice", line: "hi" });
+    const r = await placeVoiceCall({ voiceId: "doug-voice", line: "hi", dedupeKey: "k" });
     assert.equal(r.status, 400);
   });
 
   it("400 on missing / empty 'line'", async () => {
-    const r = await placeVoiceCall({ to: "+15551230123", voiceId: "doug-voice", line: "   " });
+    const r = await placeVoiceCall({ to: "+15551230123", voiceId: "doug-voice", line: "   ", dedupeKey: "k" });
     assert.equal(r.status, 400);
     if (!r.ok) assert.match(r.body.error, /line/);
   });
 
   it("400 on a non-E.164 destination", async () => {
-    const r = await placeVoiceCall({ to: "5551230123", voiceId: "doug-voice", line: "hi" });
+    const r = await placeVoiceCall({ to: "5551230123", voiceId: "doug-voice", line: "hi", dedupeKey: "k" });
     assert.equal(r.status, 400);
   });
 
   it("400 on an invalid voiceId", async () => {
-    const r = await placeVoiceCall({ to: "+15551230123", voiceId: "no spaces!", line: "hi" });
+    const r = await placeVoiceCall({ to: "+15551230123", voiceId: "no spaces!", line: "hi", dedupeKey: "k" });
     assert.equal(r.status, 400);
     if (!r.ok) assert.match(r.body.error, /voiceId/);
   });

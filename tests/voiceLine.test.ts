@@ -84,6 +84,35 @@ describe("GET /call/voice-line", () => {
     assert.equal(renderedVoice, "DougVoiceId0000000000");
   });
 
+  it("caches the rendered audio — a second fetch serves bytes without re-rendering", async () => {
+    let capturedTwiml = "";
+    _setVoiceCallerForTests(async ({ twiml }) => {
+      capturedTwiml = twiml;
+      return { callSid: "CA_vl2" };
+    });
+    let renders = 0;
+    _setTtsRendererForTests(async () => {
+      renders++;
+      return { ok: true, audio: Buffer.from("audio-bytes"), contentType: "audio/mpeg" };
+    });
+
+    await placeVoiceCall({
+      to: "+15551230123",
+      voiceId: "doug-voice",
+      line: "Reminder.",
+      dedupeKey: "vl-cache",
+    });
+    const token = tokenFromTwiml(capturedTwiml);
+    const url = `/api/call/voice-line?id=${encodeURIComponent(token)}`;
+
+    for (let i = 0; i < 3; i++) {
+      const { res, getStatus } = mockResponse();
+      await voiceLine(mockRequest({ url, method: "GET" }), res);
+      assert.equal(getStatus(), 200);
+    }
+    assert.equal(renders, 1, "ElevenLabs should be billed once across Twilio retries");
+  });
+
   it("405s a non-GET request", async () => {
     const req = mockRequest({ url: "/api/call/voice-line?id=x", method: "POST" });
     const { res, getStatus } = mockResponse();

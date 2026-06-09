@@ -19,7 +19,10 @@
 import type { IncomingMessage, ServerResponse } from "http";
 import {
   loadVoiceLine,
+  loadVoiceLineAudio,
+  storeVoiceLineAudio,
   verifyVoiceLineToken,
+  VOICE_LINE_OUTPUT_FORMAT,
 } from "../../src/core/voiceOutbound.js";
 import { renderTtsAudio } from "../../src/core/tts.js";
 import { logger } from "../../src/utils/logger.js";
@@ -45,6 +48,19 @@ export default async function handler(
     return;
   }
 
+  // Serve a previously-rendered render if we have one: Twilio retries the
+  // media fetch on transient errors, and the token stays valid for the
+  // whole TTL — re-rendering each fetch would re-bill ElevenLabs.
+  const cached = await loadVoiceLineAudio(id);
+  if (cached) {
+    const buf = Buffer.from(cached.audioB64, "base64");
+    res.statusCode = 200;
+    res.setHeader("Content-Type", cached.contentType);
+    res.setHeader("Content-Length", String(buf.length));
+    res.end(buf);
+    return;
+  }
+
   const pending = await loadVoiceLine(id);
   if (!pending) {
     log.warn({ id }, "voice-line token has no pending render (expired?)");
@@ -52,13 +68,20 @@ export default async function handler(
     return;
   }
 
-  const render = await renderTtsAudio(pending.line, pending.voiceId);
+  // Pin the telephony mp3 format so a browser-TTS env change can't turn
+  // the call into dead air (see VOICE_LINE_OUTPUT_FORMAT).
+  const render = await renderTtsAudio(pending.line, pending.voiceId, VOICE_LINE_OUTPUT_FORMAT);
   if (!render.ok) {
     log.error({ id, upstreamStatus: render.status }, "voice-line render failed");
     // 502 so Twilio surfaces a playback error rather than a hung call.
     sendStatus(res, 502, "Render failed");
     return;
   }
+
+  await storeVoiceLineAudio(id, {
+    contentType: render.contentType,
+    audioB64: render.audio.toString("base64"),
+  });
 
   res.statusCode = 200;
   res.setHeader("Content-Type", render.contentType);

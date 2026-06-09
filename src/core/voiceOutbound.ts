@@ -33,7 +33,7 @@
  * never logged — the dedupeKey is the only correlation id.
  */
 
-import { createHmac, randomUUID } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import twilio from "twilio";
 import { env } from "../config/env.js";
 import { logger } from "../utils/logger.js";
@@ -55,6 +55,16 @@ const log = logger.child({ core: "voiceOutbound" });
 
 /** Dedupe a hub retry for 30 days, same as SMS sends. */
 const CALL_IDEMPOTENCY_TTL_SECONDS = 30 * 24 * 60 * 60;
+
+/**
+ * Output format the voice line is rendered in for Twilio `<Play>`. Pinned
+ * to a known mp3 format (→ Content-Type audio/mpeg) rather than the
+ * browser-TTS `ELEVENLABS_TTS_OUTPUT_FORMAT` env var: Twilio `<Play>` only
+ * accepts playable mp3/wav, and coupling the telephony channel to a var
+ * named/tuned for the in-app UI would let a UI format change silently turn
+ * every outbound call into dead air.
+ */
+export const VOICE_LINE_OUTPUT_FORMAT = "mp3_44100_128";
 
 // ── Twilio call placer (injectable for tests) ─────────────────────────────────
 
@@ -103,17 +113,53 @@ function signToken(id: string): string {
   return `${id}.${mac}`;
 }
 
-/** Verify + parse a signed token; returns the bare id or null. */
+/** Verify + parse a signed token; returns the bare id or null. The MAC
+ *  comparison is constant-time (the id is attacker-controllable via the
+ *  URL, so a byte-short-circuiting `===` would leak a timing oracle on the
+ *  MAC — the very forgery the signing exists to prevent). */
 export function verifyVoiceLineToken(token: string | undefined): string | null {
   if (!token) return null;
   const dot = token.lastIndexOf(".");
   if (dot <= 0) return null;
   const id = token.slice(0, dot);
-  return signToken(id) === token ? id : null;
+  const expected = Buffer.from(signToken(id), "utf8");
+  const provided = Buffer.from(token, "utf8");
+  if (expected.length !== provided.length) return null;
+  return timingSafeEqual(expected, provided) ? id : null;
 }
 
 function voiceLineKvKey(id: string): string {
   return `voiceline:${id}`;
+}
+
+function voiceLineAudioKvKey(id: string): string {
+  return `voiceline:audio:${id}`;
+}
+
+/** Cached rendered audio for a voice line, so a Twilio media-fetch RETRY
+ *  (or any duplicate GET on the still-valid token) replays bytes instead
+ *  of re-rendering — ElevenLabs is billed per character. */
+export type CachedVoiceAudio = { contentType: string; audioB64: string };
+
+export async function loadVoiceLineAudio(id: string): Promise<CachedVoiceAudio | null> {
+  try {
+    const raw = await kv().get(voiceLineAudioKvKey(id));
+    if (!raw) return null;
+    return JSON.parse(raw) as CachedVoiceAudio;
+  } catch {
+    return null;
+  }
+}
+
+export async function storeVoiceLineAudio(
+  id: string,
+  audio: CachedVoiceAudio,
+): Promise<void> {
+  try {
+    await kv().set(voiceLineAudioKvKey(id), JSON.stringify(audio), env.voiceLineTtlSeconds);
+  } catch {
+    /* best-effort cache — a miss just re-renders */
+  }
 }
 
 export type PendingVoiceLine = { voiceId: string; line: string };
@@ -230,7 +276,12 @@ export async function checkVoiceOutboundRateLimit(
 export async function placeVoiceCall(
   body: VoiceOutboundRequest | undefined,
 ): Promise<VoiceOutboundResult> {
-  const keyParse = parseIdempotencyKey(body?.dedupeKey);
+  // dedupeKey is REQUIRED — same retry-safety contract as /api/sms/send:
+  // the no-double-dial guarantee only holds when it's present.
+  if (!body?.dedupeKey) {
+    return { ok: false, status: 400, body: { error: "missing 'dedupeKey'" } };
+  }
+  const keyParse = parseIdempotencyKey(body.dedupeKey);
   if (!keyParse.ok) return keyParse;
   const dedupeHash = keyParse.key;
 
@@ -292,13 +343,9 @@ export async function placeVoiceCall(
   // so the hub treats it as handled. Cached for replay consistency.
   if (await isSuppressed(body.to)) {
     log.info({ to: maskPhoneNumber(body.to) }, "Outbound voice suppressed (opted out)");
-    const result: VoiceOutboundResult = {
-      ok: true,
-      status: 200,
-      body: { callSid: "suppressed" },
-    };
-    await storeIdempotent("call", dedupeHash, result, CALL_IDEMPOTENCY_TTL_SECONDS);
-    return result;
+    // NOT cached — suppression is mutable (a later START must let a retry
+    // of the same dedupeKey actually place the call).
+    return { ok: true, status: 200, body: { callSid: "suppressed" } };
   }
 
   // Stash the line under a signed token Twilio will fetch via <Play>.

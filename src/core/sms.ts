@@ -203,10 +203,17 @@ export async function checkSmsRateLimit(
  * E.164 number in the allow-list before touching Twilio.
  */
 export async function sendSms(body: SmsRequest | undefined): Promise<SmsResult> {
+  // dedupeKey is REQUIRED: it's the idempotency key, and the endpoint's
+  // retry-safety guarantee (a hub retry never double-sends) only holds
+  // when it's present. A missing key is a contract violation, not an
+  // opt-out of idempotency — fail closed with 400.
+  if (!body?.dedupeKey) {
+    return { ok: false, status: 400, body: { error: "missing 'dedupeKey'" } };
+  }
   // dedupeKey runs through the same validation as the Idempotency-Key
   // header (length + printable-ASCII) so the hub can't smuggle a giant
   // or control-char-laden key into Redis key names.
-  const keyParse = parseIdempotencyKey(body?.dedupeKey);
+  const keyParse = parseIdempotencyKey(body.dedupeKey);
   if (!keyParse.ok) return keyParse;
   const dedupeHash = keyParse.key;
 
@@ -252,13 +259,11 @@ export async function sendSms(body: SmsRequest | undefined): Promise<SmsResult> 
   // Cached under the dedupeKey so replays stay consistent.
   if (await isSuppressed(body.to)) {
     log.info({ to: maskPhoneNumber(body.to) }, "SMS send suppressed (opted out)");
-    const result: SmsResult = {
-      ok: true,
-      status: 200,
-      body: { sid: "suppressed" },
-    };
-    await storeIdempotent("sms", dedupeHash, result, SEND_IDEMPOTENCY_TTL_SECONDS);
-    return result;
+    // Deliberately NOT cached: suppression is mutable. If the number later
+    // replies START (opts back in) and the hub retries the SAME dedupeKey,
+    // we must re-check isSuppressed and actually send — a cached
+    // "suppressed" would silently swallow that message for up to 30 days.
+    return { ok: true, status: 200, body: { sid: "suppressed" } };
   }
 
   // A2P enforcement: in production we refuse to send without a Messaging
