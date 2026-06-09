@@ -1,25 +1,29 @@
 /**
- * api/call/outbound.ts — Vercel serverless function
+ * api/call/outbound.ts — Vercel serverless function (hub → talk seam)
  *
- * POST /call/outbound  — Initiate an outbound Twilio call that
- *                        connects to the Media Stream WebSocket on
- *                        WS_DOMAIN.
+ * POST /api/call/outbound — Place a one-shot outbound voice call that
+ *                           plays a single line in a named voice (e.g.
+ *                           "doug-voice") and hangs up.
  *
- * Body: { to: "+15551234567", role?: "parent" }
- * Auth: Bearer token when OUTBOUND_API_KEY is set.
- * Rate limits: per-minute and per-hour fixed windows, enforced via KV
- *              (shared across Vercel + long-running host when
- *              KV_URL/KV_TOKEN are configured).
+ * Body: { to, voiceId, line, dedupeKey }
+ * 200 -> { callSid }
+ * Auth: shared hub↔talk Bearer (constant-time). Idempotent on dedupeKey.
+ *       Rate-limited (per-min/hour + hard per-day cap) via KV.
+ *
+ * NOTE: this REPLACES the previous interactive {to, role} contract that
+ * connected the callee to the Media Stream loop. That interactive path
+ * now lives on the Fastify host at /call/outbound-interactive
+ * (src/handlers/outbound.ts → src/core/outbound.ts).
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
 import {
-  authorizeOutbound,
-  checkOutboundRateLimit,
-  initiateOutboundCall,
-  type OutboundRequest,
-  type OutboundResult,
-} from "../../src/core/outbound.js";
+  authorizeVoiceOutbound,
+  checkVoiceOutboundRateLimit,
+  placeVoiceCall,
+  type VoiceOutboundRequest,
+  type VoiceOutboundResult,
+} from "../../src/core/voiceOutbound.js";
 import {
   parseBody,
   requireMethod,
@@ -27,11 +31,9 @@ import {
   stampRequestId,
 } from "../../src/core/httpAdapter.js";
 
-function sendResult(res: ServerResponse, result: OutboundResult): void {
-  if (!result.ok && result.headers) {
-    for (const [k, v] of Object.entries(result.headers)) {
-      res.setHeader(k, v);
-    }
+function sendResult(res: ServerResponse, result: VoiceOutboundResult): void {
+  if (result.headers) {
+    for (const [k, v] of Object.entries(result.headers)) res.setHeader(k, v);
   }
   sendJson(res, result.status, result.body);
 }
@@ -43,25 +45,19 @@ export default async function handler(
   stampRequestId(req, res);
   if (!requireMethod(req, res, "POST")) return;
 
-  const { result: authError } = await authorizeOutbound(req.headers.authorization);
+  const authError = authorizeVoiceOutbound(req.headers.authorization);
   if (authError) {
     sendResult(res, authError);
     return;
   }
 
-  const rateLimitError = await checkOutboundRateLimit(
-    req.headers.authorization,
-  );
+  const rateLimitError = await checkVoiceOutboundRateLimit(req.headers.authorization);
   if (rateLimitError) {
     sendResult(res, rateLimitError);
     return;
   }
 
-  // Idempotency-Key is forwarded to initiateOutboundCall which
-  // handles lookup + cache on its own. Node's IncomingMessage
-  // lowercases header names.
-  const idempotencyKey = req.headers["idempotency-key"];
-  const body = (await parseBody(req)) as unknown as OutboundRequest | undefined;
-  const result = await initiateOutboundCall(body, idempotencyKey);
+  const body = (await parseBody(req)) as unknown as VoiceOutboundRequest | undefined;
+  const result = await placeVoiceCall(body);
   sendResult(res, result);
 }

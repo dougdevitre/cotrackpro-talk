@@ -31,6 +31,8 @@ never blocked.
 |------|----------|-----------------|
 | `resolvePhone(phone)` | `POST {HUB_BASE_URL}/internal/v1/resolve-phone` | `linked{subject}`, `not_linked`, `unauthorized`, `not_configured`, `invalid`, `error` |
 | `sendAuthLink(phone)` | `POST {HUB_BASE_URL}/internal/v1/send-auth-link` | `sent`, `rate_limited`, `sms_unavailable`, `not_configured`, `invalid`, `unauthorized`, `error` |
+| `recordConsent(phone, state)` | `POST {HUB_BASE_URL}/internal/v1/record-consent` | `ok`, `unauthorized`, `not_configured`, `invalid`, `error` |
+| `forwardInboundSms(args)` | `POST {HUB_BASE_URL}/internal/v1/inbound-sms` | `ok{reply?}`, `unauthorized`, `not_configured`, `invalid`, `error` |
 
 The talk edge **never sees the token** — on `send-auth-link` the hub
 composes the entire SMS body and sends it back through our
@@ -53,16 +55,45 @@ approved brand/campaign. Production **fails closed** (`500
 sms_misconfigured`) if the service SID is unset; non-prod falls back to
 `TWILIO_PHONE_NUMBER` for local testing.
 
-### `POST /api/call/outbound` — partial / deferred
+### `POST /api/call/outbound` — implemented (`src/core/voiceOutbound.ts`)
 
-The existing `/call/outbound` already places **authenticated, idempotent,
-rate-limited** outbound calls with the shared bearer, but it connects the
-callee to the full interactive voice loop (body `{ to, role }`,
-`Idempotency-Key` header). The hub contract's one-shot variant — body
-`{ to, voiceId, line, dedupeKey }` that simply *plays `line` in ElevenLabs
-`voiceId`* (e.g. a voice-consent announcement) — is a distinct TTS-render
-subsystem and is **not yet implemented**. It needs explicit VOICE consent
-gating before any production send.
+The hub contract's **one-shot** variant. Body
+`{ to, voiceId, line, dedupeKey }`: places a call that plays `line` in a
+named voice (`"doug-voice"` → `ELEVENLABS_VOICE_ID_DOUG`) and hangs up.
+Responds `200 { callSid }`. Same shared-bearer auth, E.164 + country
+allow-list, suppression-list check, and KV idempotency (dedupeKey, 30d)
+as `/api/sms/send`, **plus** a hard per-UTC-day cap (`CALL_DAILY_CAP`).
+
+Rendering is deferred to Twilio fetch time: the call's TwiML `<Play>`s a
+signed `/call/voice-line?id=<token>` URL; **`GET /call/voice-line`**
+(`api/call/voice-line.ts`) verifies the HMAC token, looks up the pending
+`{ voiceId, line }` from KV, renders it through ElevenLabs
+(`renderTtsAudio`), and streams the audio back. The token is signed so a
+leaked URL can't coerce arbitrary (billed) renders.
+
+> This **replaces** the previous interactive `{ to, role }` contract on
+> `/api/call/outbound`. That interactive Media-Stream variant
+> (`src/core/outbound.ts`) now lives on the Fastify host at
+> `/call/outbound-interactive`.
+
+### `POST /api/sms/incoming` — implemented (`api/sms/incoming.ts`)
+
+Twilio inbound-SMS webhook. Verifies `X-Twilio-Signature`, then
+classifies the body (`src/core/consent.ts`):
+
+- **STOP / UNSUBSCRIBE / CANCEL / END / QUIT** → add to the KV
+  suppression list, `record-consent` `opted_out`, reply with an opt-out
+  confirmation.
+- **START / UNSTOP** → remove suppression, `record-consent` `opted_in`,
+  reply.
+- **HELP / INFO** → static reply (no hub call).
+- anything else → forward to the hub `/internal/v1/inbound-sms` and
+  return its reply as TwiML.
+
+The suppression list is the talk-side source of truth and is read on the
+outbound SMS **and** voice paths — a suppressed number is never texted or
+called. The canonical opt-out footer is appended (exactly once) only to
+**talk-composed** inbound replies; outbound hub bodies are sent verbatim.
 
 ## Inbound voice loop (`src/core/twiml.ts` → `callHandler`)
 

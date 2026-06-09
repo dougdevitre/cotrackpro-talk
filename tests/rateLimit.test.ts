@@ -368,6 +368,6 @@ describe("checkRateLimit — atomic pipeline (M-1)", () => {
       perHour: 100,
     });
     assert.equal(r.allowed, true);
-    assert.deepEqual(r.counts, { minute: 5, hour: 42 });
+    assert.deepEqual(r.counts, { minute: 5, hour: 42, day: 0 });
   });
 });

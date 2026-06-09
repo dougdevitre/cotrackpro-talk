@@ -4,7 +4,7 @@
  * Fastify server with:
  *   - POST /call/incoming     — Twilio webhook → returns TwiML
  *   - WS   /call/stream       — Bidirectional media stream from Twilio
- *   - POST /call/outbound     — Initiate outbound calls
+ *   - POST /call/outbound-interactive — Initiate interactive outbound calls
  *   - POST /call/status       — Call status callbacks
  *   - GET  /health            — Health check
  */
@@ -100,7 +100,7 @@ async function main() {
     );
     logger.info(`  WebSocket:       wss://${env.wsDomain}/call/stream`);
     logger.info(`  Twilio webhook:  https://${env.apiDomain}/call/incoming`);
-    logger.info(`  Outbound API:    https://${env.apiDomain}/call/outbound`);
+    logger.info(`  Outbound (intr): https://${env.wsDomain}/call/outbound-interactive`);
     logger.info(`  Records API:     https://${env.apiDomain}/records`);
     logger.info(`  Health (WS):     https://${env.wsDomain}/health`);
     if (isHybrid) {

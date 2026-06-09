@@ -24,7 +24,7 @@ import { logger } from "../utils/logger.js";
 
 const log = logger.child({ core: "rateLimit" });
 
-export type RateLimitWindow = "minute" | "hour";
+export type RateLimitWindow = "minute" | "hour" | "day";
 
 export type RateLimitResult = {
   /** true = request allowed; false = denied. */
@@ -34,7 +34,7 @@ export type RateLimitResult = {
   /** Unix ms at which the limiting window resets. */
   resetAt?: number;
   /** Current counters for observability. */
-  counts: { minute: number; hour: number };
+  counts: { minute: number; hour: number; day: number };
 };
 
 export type RateLimitConfig = {
@@ -42,6 +42,12 @@ export type RateLimitConfig = {
   perMinute: number;
   /** Max requests per 3600-second window. Set to 0 to disable. */
   perHour: number;
+  /**
+   * Max requests per UTC-day window. Optional — omit or set to 0 to
+   * disable. Added for the outbound-voice daily cap; harmless for
+   * existing callers that don't pass it.
+   */
+  perDay?: number;
 };
 
 /**
@@ -61,20 +67,24 @@ export async function checkRateLimit(
   namespace: string,
   config: RateLimitConfig,
 ): Promise<RateLimitResult> {
+  const perDay = config.perDay ?? 0;
+
   // Disabled entirely.
-  if (config.perMinute <= 0 && config.perHour <= 0) {
-    return { allowed: true, counts: { minute: 0, hour: 0 } };
+  if (config.perMinute <= 0 && config.perHour <= 0 && perDay <= 0) {
+    return { allowed: true, counts: { minute: 0, hour: 0, day: 0 } };
   }
 
-  // Fixed-window bucket keys. Aligning on UTC minute/hour is simpler
+  // Fixed-window bucket keys. Aligning on UTC minute/hour/day is simpler
   // than tracking per-client window start times and makes counters
   // easy to reason about in Redis.
   const now = Date.now();
   const minuteBucket = Math.floor(now / 60_000);
   const hourBucket = Math.floor(now / 3_600_000);
+  const dayBucket = Math.floor(now / 86_400_000);
 
   const minuteKey = `rl:${namespace}:${clientKey}:m:${minuteBucket}`;
   const hourKey = `rl:${namespace}:${clientKey}:h:${hourBucket}`;
+  const dayKey = `rl:${namespace}:${clientKey}:d:${dayBucket}`;
 
   try {
     // Increment both counters atomically via the KV pipeline. On
@@ -95,6 +105,11 @@ export async function checkRateLimit(
     if (config.perHour > 0) {
       ops.push({ op: "incrBy", key: hourKey, by: 1, ttlSeconds: 3700 });
     }
+    if (perDay > 0) {
+      // TTL safely longer than the 86,400s window so expired day
+      // buckets clean themselves up without a reaper.
+      ops.push({ op: "incrBy", key: dayKey, by: 1, ttlSeconds: 90_000 });
+    }
 
     const results = await kv().pipeline(ops);
 
@@ -104,13 +119,14 @@ export async function checkRateLimit(
     let idx = 0;
     const minuteCount = config.perMinute > 0 ? results[idx++] : 0;
     const hourCount = config.perHour > 0 ? results[idx++] : 0;
+    const dayCount = perDay > 0 ? results[idx++] : 0;
 
     if (config.perMinute > 0 && minuteCount > config.perMinute) {
       return {
         allowed: false,
         limitedBy: "minute",
         resetAt: (minuteBucket + 1) * 60_000,
-        counts: { minute: minuteCount, hour: hourCount },
+        counts: { minute: minuteCount, hour: hourCount, day: dayCount },
       };
     }
 
@@ -119,19 +135,28 @@ export async function checkRateLimit(
         allowed: false,
         limitedBy: "hour",
         resetAt: (hourBucket + 1) * 3_600_000,
-        counts: { minute: minuteCount, hour: hourCount },
+        counts: { minute: minuteCount, hour: hourCount, day: dayCount },
+      };
+    }
+
+    if (perDay > 0 && dayCount > perDay) {
+      return {
+        allowed: false,
+        limitedBy: "day",
+        resetAt: (dayBucket + 1) * 86_400_000,
+        counts: { minute: minuteCount, hour: hourCount, day: dayCount },
       };
     }
 
     return {
       allowed: true,
-      counts: { minute: minuteCount, hour: hourCount },
+      counts: { minute: minuteCount, hour: hourCount, day: dayCount },
     };
   } catch (err) {
     // Fail open. The alternative — blocking requests when Redis is
     // unreachable — is strictly worse for availability.
     log.warn({ err, namespace, clientKey }, "Rate limiter error — failing open");
-    return { allowed: true, counts: { minute: 0, hour: 0 } };
+    return { allowed: true, counts: { minute: 0, hour: 0, day: 0 } };
   }
 }
 
