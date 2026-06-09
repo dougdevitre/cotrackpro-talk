@@ -55,11 +55,34 @@ pre-existing — re-put only when rotating.
 
 ## Step 2 — Shared KV (MANDATORY) ⚠️
 
-The suppression list (STOP) and idempotency (`dedupeKey`) live in the KV
-store (`src/services/kv.ts`). The default backend is **in-memory and
-per-process** — on Vercel serverless that means **an opt-out written on
-one request is invisible to the next**, and `dedupeKey` won't dedupe a
-retry. You MUST point KV at Upstash/Vercel KV:
+The suppression list (STOP), idempotency (`dedupeKey`), and rate-limit
+counters live in the KV store (`src/services/kv.ts`). The default backend
+is **in-memory and per-process** — on Vercel serverless that means **an
+opt-out written on one request is invisible to the next**, and `dedupeKey`
+won't dedupe a retry. Pick ONE durable backend.
+
+**Option A — DynamoDB (AWS-native, no third-party vendor):**
+
+```bash
+# One-time: create the table (partition key pk, on-demand billing) + TTL.
+aws dynamodb create-table --region us-east-1 \
+  --table-name cotrackpro-kv \
+  --attribute-definitions AttributeName=pk,AttributeType=S \
+  --key-schema AttributeName=pk,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST
+aws dynamodb update-time-to-live --region us-east-1 \
+  --table-name cotrackpro-kv \
+  --time-to-live-specification "Enabled=true,AttributeName=expireAt"
+
+# Point the app at it (the Vercel functions need AWS creds in the env —
+# set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION for a least-
+# privilege IAM user with GetItem/PutItem/UpdateItem/DeleteItem on the table).
+vercel env add KV_BACKEND     production   # value: dynamo
+vercel env add KV_DYNAMO_TABLE production   # value: cotrackpro-kv
+vercel env add AWS_REGION     production   # value: us-east-1
+```
+
+**Option B — Upstash / Vercel KV:**
 
 ```bash
 vercel env add KV_URL   production   # https://<db>.upstash.io
@@ -68,7 +91,7 @@ vercel env add KV_TOKEN production   # Upstash REST token
 ```
 
 Do **not** go live on the memory backend. STOP compliance and the
-no-double-send guarantee both depend on this.
+no-double-send guarantee both depend on a durable shared backend.
 
 ## Step 3 — App config (non-secret env)
 
@@ -109,16 +132,20 @@ vercel env ls production | grep -E 'MESSAGING_SERVICE_SID|VOICE_ID_DOUG|KV_URL'
 
 - Confirm the Messaging Service's **brand + campaign are APPROVED** and
   the sending number is attached. Unregistered A2P traffic is filtered.
-- **Advanced Opt-Out alignment.** If the Messaging Service has carrier
-  Advanced Opt-Out enabled, Twilio intercepts STOP itself and our
-  `/sms/incoming` may not see it. Decide who owns suppression:
-  - Let our app own it → **disable** Advanced Opt-Out on the service so
-    STOP reaches `/sms/incoming` (it writes the suppression list + calls
-    `record-consent`).
-  - Let Twilio own it → keep it on, and know our app-level suppression
-    list will only catch STOPs that bypass the carrier layer.
-  Running both un-aligned risks a number Twilio considers opted-out but
-  our list considers active (or vice-versa).
+- **Advanced Opt-Out** — either topology now works; the app keeps both
+  sides in sync:
+  - **Enabled (recommended for A2P):** Twilio processes STOP/START/HELP
+    and sends its configured replies, then fires `/sms/incoming` with an
+    `OptOutType` field. The app honors that — syncing our suppression list
+    + `record-consent` so the **voice** path also respects the opt-out —
+    and returns empty TwiML so it doesn't double-reply. Separately, if a
+    send is attempted to an opted-out number, Twilio returns error
+    **21610**; `/api/sms/send` catches it, returns the `suppressed`
+    sentinel, and syncs our list.
+  - **Disabled:** STOP reaches `/sms/incoming` as a normal keyword and the
+    app owns suppression + the reply directly.
+  Configure Twilio's STOP/START/HELP response copy to match
+  `src/core/consent.ts` so the wording is consistent.
 - Quiet hours / frequency caps: confirm these are enforced hub-side
   (talk enforces only the per-min/hour/day rate caps, not time-of-day).
 

@@ -218,12 +218,23 @@ export const env = {
 
   // ── KV store (cross-instance shared state: rate limits, etc.) ────────
   // Backend: "auto" (default — uses upstash if KV_URL/KV_TOKEN set, else
-  // memory), "memory", or "upstash".
-  kvBackend: optional("KV_BACKEND", "auto") as "auto" | "memory" | "upstash",
+  // memory), "memory", "upstash", or "dynamo".
+  kvBackend: optional("KV_BACKEND", "auto") as
+    | "auto"
+    | "memory"
+    | "upstash"
+    | "dynamo",
   // Upstash Redis REST URL + Bearer token. Vercel KV is API-compatible;
   // set these to Vercel KV's values to use that instead.
   kvUrl: process.env.KV_URL || "",
   kvToken: process.env.KV_TOKEN || "",
+  // DynamoDB table for the KV backend (KV_BACKEND=dynamo). AWS-native
+  // alternative to Upstash — works from Vercel serverless (HTTP, no VPC)
+  // and uses DynamoDB's native TTL. Partition key "pk" (String); enable
+  // TTL on the "expireAt" attribute. Uses AWS_REGION + the standard AWS
+  // credential chain (DYNAMO_MAX_RETRIES tunes the retry budget). Distinct
+  // from the call-records table (DYNAMO_TABLE_NAME).
+  kvDynamoTable: optional("KV_DYNAMO_TABLE", "cotrackpro-kv"),
 
   // ── Rate limits ──────────────────────────────────────────────────────
   // Fixed-window rate limit on POST /call/outbound. Protects against
