@@ -401,17 +401,19 @@ Production serves on `cotrackpro-talk.vercel.app` out of the box. To also serve 
    _(Record returned by Vercel: **CNAME `talk` → `cname.vercel-dns.com`** — confirm in the
    dashboard at add time and update here if Vercel returns a different target.)_
 
-2. **Create the DNS record at GoDaddy** (DNS is GoDaddy; creds in SSM under `dns/godaddy/*`).
-   - Console: **GoDaddy → cotrackpro.com → DNS → Add** → Type `CNAME`, Host `talk`,
-     Value `cname.vercel-dns.com`, TTL default.
-   - API (optional):
-     ```bash
-     GK=$(aws ssm get-parameter --region us-east-1 --name /cotrackpro/prod/dns/godaddy/api_key --with-decryption --query Parameter.Value --output text)
-     GS=$(aws ssm get-parameter --region us-east-1 --name /cotrackpro/prod/dns/godaddy/api_secret --with-decryption --query Parameter.Value --output text)
-     curl -sS -X PUT "https://api.godaddy.com/v1/domains/cotrackpro.com/records/CNAME/talk" \
-       -H "Authorization: sso-key $GK:$GS" -H "Content-Type: application/json" \
-       -d '[{"data":"cname.vercel-dns.com","ttl":3600}]'
-     ```
+2. **Create the DNS record in Route 53.** `cotrackpro.com`'s nameservers are **AWS Route 53**
+   (`*.awsdns-*` — confirm with `vercel domains inspect cotrackpro.com`), so the record goes there,
+   not GoDaddy (GoDaddy may be the registrar, but Route 53 serves the DNS):
+   ```bash
+   ZONE=$(aws route53 list-hosted-zones-by-name --dns-name cotrackpro.com --query "HostedZones[0].Id" --output text | sed 's#/hostedzone/##')
+   aws route53 change-resource-record-sets --hosted-zone-id "$ZONE" --change-batch '{
+     "Changes":[{"Action":"UPSERT","ResourceRecordSet":{
+       "Name":"talk.cotrackpro.com","Type":"CNAME","TTL":300,
+       "ResourceRecords":[{"Value":"cname.vercel-dns.com"}]}}]}'
+   ```
+   If `talk.cotrackpro.com` was already serving another Vercel project, the record likely already
+   exists — in that case only the project assignment needs to move (Vercel: account **Domains** →
+   `cotrackpro.com` → reassign `talk` to `cotrackpro-talk`).
 
 3. **Wait for DNS + Vercel's automatic TLS issuance** (usually minutes). Done when
    `https://talk.cotrackpro.com` loads this app over HTTPS. The app auto-detects whichever
