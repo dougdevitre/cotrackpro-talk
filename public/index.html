@@ -7,6 +7,11 @@
   <title>CoTrackPro · Calls &amp; Texts</title>
   <meta name="description" content="The calls-and-texts companion to CoTrackPro: gentle reminders, two-way texting, and a calm voice line for families navigating high-conflict separation." />
   <meta name="theme-color" content="#0a0f1c" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="CoTrackPro · Calls &amp; Texts" />
+  <meta property="og:description" content="Gentle reminders, two-way texting, and a calm voice line — the part of CoTrackPro that reaches your phone." />
+  <meta property="og:image" content="https://assets.cotrackpro.com/CoTrackPro%2BLogo.jpg" />
+  <meta name="twitter:card" content="summary" />
   <link rel="icon" href="https://assets.cotrackpro.com/CoTrackPro%2BLogo.jpg" />
   <link rel="apple-touch-icon" href="https://assets.cotrackpro.com/CoTrackPro%2BLogo.jpg" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -14,11 +19,11 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <style>
     :root{
-      --bg:#0a0f1c;
-      --surface:#101a2e; --surface-2:#0d1626;
-      --line:#1f2c47; --line-soft:rgba(255,255,255,.06);
-      --ink:#f4f8ff; --text:#a3b2c7; --muted:#6f8197;
-      --accent:#38bdf8; --accent-strong:#22b3ef; --on-accent:#05233a;
+      --bg:#0a1120;
+      --surface:#111C2E; --surface-2:#0d1626;
+      --line:#1F2C42; --line-soft:rgba(255,255,255,.05);
+      --ink:#ffffff; --text:#94A3B8; --muted:#64748b;
+      --accent:#0EA5E9; --cyan:#38BDF8; --on-accent:#04233a;
       --warn:#f5b454;
       --radius:14px;
       --font:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
@@ -27,7 +32,7 @@
     body{
       margin:0;color:var(--text);font-family:var(--font);font-size:16px;line-height:1.6;
       background:var(--bg);
-      background-image:radial-gradient(1100px 560px at 50% -10%, #16233f 0%, rgba(22,35,63,0) 62%);
+      background-image:radial-gradient(1150px 580px at 50% -12%, #15294a 0%, rgba(21,41,74,0) 60%);
       background-repeat:no-repeat;
       -webkit-font-smoothing:antialiased;
     }
@@ -37,7 +42,7 @@
     h1,h2,h3{line-height:1.2;color:var(--ink);margin:0;letter-spacing:-.01em}
     .muted{color:var(--muted)}
     .eyebrow{display:block;font-size:.78rem;font-weight:700;letter-spacing:.14em;
-      text-transform:uppercase;color:var(--accent);margin-bottom:.5rem}
+      text-transform:uppercase;color:var(--cyan);margin-bottom:.5rem}
     code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.86em;
       background:var(--surface-2);color:#8fd6f7;border:1px solid var(--line);
       padding:1px 7px;border-radius:6px;white-space:nowrap}
@@ -53,7 +58,11 @@
     /* Text fallback if the remote logo fails */
     .logo-fallback{width:32px;height:32px;border-radius:8px;background:var(--accent);color:var(--on-accent);
       display:none;place-items:center;font-weight:800;font-size:.95rem}
+    .nav-right{display:flex;align-items:center;gap:1rem}
     nav.top a.nav-link{color:var(--text);font-size:.92rem;font-weight:500}
+    /* Active page indicator — the app's bright pill style */
+    .pill{background:var(--accent);color:var(--on-accent);font-weight:700;font-size:.9rem;
+      line-height:1;padding:.42rem .9rem;border-radius:999px;letter-spacing:-.005em;white-space:nowrap}
 
     /* Hero */
     header.hero .wrap{padding:3rem 1.25rem 2.4rem}
@@ -61,7 +70,7 @@
     header.hero p.lead{font-size:1.18rem;color:var(--text);max-width:44rem;margin:0}
 
     section{padding:2.2rem 0;border-top:1px solid var(--line-soft)}
-    section h2{font-size:1.5rem;font-weight:700;margin-bottom:.35rem}
+    section h2{font-size:1.5rem;font-weight:800;margin-bottom:.35rem}
     section > p.sub{color:var(--muted);margin:.2rem 0 1.2rem;max-width:46rem}
 
     /* Safety — amber-accented so urgent help stands out in the dark theme */
@@ -92,8 +101,8 @@
     ol.play > li{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
       padding:1rem 1.1rem 1rem 3.3rem;position:relative}
     ol.play > li::before{counter-increment:step;content:counter(step);position:absolute;left:1rem;top:1rem;
-      width:1.7rem;height:1.7rem;border-radius:8px;background:var(--surface-2);border:1px solid var(--line);
-      color:var(--accent);display:grid;place-items:center;font-size:.85rem;font-weight:700}
+      width:1.7rem;height:1.7rem;border-radius:8px;background:var(--accent);
+      color:var(--on-accent);display:grid;place-items:center;font-size:.85rem;font-weight:800}
     ol.play b{display:block;margin-bottom:.15rem;color:var(--ink)}
     ol.play span{color:var(--text);font-size:.95rem}
 
@@ -119,9 +128,12 @@
         <img class="logo-img" src="https://assets.cotrackpro.com/CoTrackPro%2BLogo.jpg" alt=""
           onerror="this.style.display='none';this.nextElementSibling.style.display='grid'" />
         <span class="logo-fallback" aria-hidden="true">CT</span>
-        <b>CoTrackPro</b><span class="sep">· Calls &amp; Texts</span>
+        <b>CoTrackPro</b>
       </span>
-      <a class="nav-link" href="https://cotrackpro.com">cotrackpro.com&nbsp;↗</a>
+      <span class="nav-right">
+        <span class="pill" aria-current="page">Calls &amp; Texts</span>
+        <a class="nav-link" href="https://cotrackpro.com">cotrackpro.com&nbsp;↗</a>
+      </span>
     </div>
   </nav>
 
