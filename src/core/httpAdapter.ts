@@ -31,8 +31,18 @@ export async function parseBody(
   req: IncomingMessage,
 ): Promise<Record<string, string>> {
   const contentType = (req.headers["content-type"] || "").toLowerCase();
-  const raw = await readRawBody(req);
-  if (!raw) return {};
+  let raw = await readRawBody(req);
+  if (!raw) {
+    // Some runtimes (incl. certain Vercel configs) consume and pre-parse the
+    // request body before our handler runs, leaving the raw stream empty. If
+    // a parsed body is hanging off req, use it directly — critical for Twilio
+    // signature validation, which fails on empty params. Field values are
+    // strings for both urlencoded (Twilio) and our JSON bodies.
+    const pre = (req as unknown as { body?: unknown }).body;
+    if (pre && typeof pre === "object") return pre as Record<string, string>;
+    if (typeof pre === "string" && pre) raw = pre;
+    else return {};
+  }
 
   if (contentType.includes("application/json")) {
     try {
@@ -53,6 +63,23 @@ export async function parseBody(
   }
 
   return {};
+}
+
+/**
+ * The public host the client actually reached us on, taken from the proxy
+ * headers. On Vercel, `x-forwarded-host` carries the original Host the
+ * client used (e.g. the short `cotrackpro-talk.vercel.app` alias Twilio
+ * called), which is what Twilio signed — and which can differ from a
+ * configured/auto-detected apiDomain. Falls back to the Host header, then
+ * undefined. A comma-separated x-forwarded-host (multiple proxies) keeps
+ * the first hop.
+ */
+export function publicHost(req: IncomingMessage): string | undefined {
+  const fwd = req.headers["x-forwarded-host"];
+  const first = (Array.isArray(fwd) ? fwd[0] : fwd)?.split(",")[0]?.trim();
+  if (first) return first;
+  const host = req.headers.host;
+  return Array.isArray(host) ? host[0] : host;
 }
 
 /** Parse a query string into a plain object. Last value wins on dupes. */

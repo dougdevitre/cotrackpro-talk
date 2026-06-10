@@ -26,6 +26,7 @@ import { logger } from "../../src/utils/logger.js";
 import {
   parseBody,
   parseQuery,
+  publicHost,
   requireMethod,
   sendStatus,
   sendXml,
@@ -53,6 +54,7 @@ export default async function handler(
     req.url,
     "/call/incoming",
     env.apiDomain,
+    publicHost(req),
   );
   if (!validateTwilioSignature(signature, fullUrl, body)) {
     sendStatus(res, 403, "Forbidden");

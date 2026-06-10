@@ -15,6 +15,7 @@ import {
 } from "../../src/core/twiml.js";
 import {
   parseBody,
+  publicHost,
   requireMethod,
   sendStatus,
   stampRequestId,
@@ -37,6 +38,7 @@ export default async function handler(
     req.url,
     "/call/status",
     env.apiDomain,
+    publicHost(req),
   );
   if (!validateTwilioSignature(signature, fullUrl, body)) {
     sendStatus(res, 403, "Forbidden");
