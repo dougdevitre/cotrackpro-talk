@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="robots" content="noindex" />
+  <title>Sign up for texts · CoTrackPro Talk</title>
+  <meta name="description" content="Opt in to SMS from CoTrackPro Talk — verification codes, call notifications, reminders, and account alerts." />
+  <meta name="theme-color" content="#0a0f1c" />
+  <link rel="icon" href="https://assets.cotrackpro.com/CoTrackPro%2BLogo.jpg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    :root{
+      --bg:#0a1120; --surface:#111C2E; --surface-2:#0d1626;
+      --line:#1F2C42; --line-soft:rgba(255,255,255,.05);
+      --ink:#fff; --text:#94A3B8; --muted:#64748b;
+      --accent:#0EA5E9; --cyan:#38BDF8; --on-accent:#04233a; --warn:#f5b454;
+      --radius:14px; --font:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;color:var(--text);font-family:var(--font);font-size:16px;line-height:1.6;background:var(--bg);
+      background-image:radial-gradient(1150px 580px at 50% -12%, #15294a 0%, rgba(21,41,74,0) 60%);
+      background-repeat:no-repeat;-webkit-font-smoothing:antialiased}
+    .wrap{max-width:560px;margin:0 auto;padding:0 1.25rem}
+    a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+    h1{line-height:1.2;color:var(--ink);margin:0;letter-spacing:-.01em;font-size:1.9rem;font-weight:800}
+    .eyebrow{display:block;font-size:.78rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
+      color:var(--cyan);margin-bottom:.5rem}
+    code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.86em;background:var(--surface-2);
+      color:#8fd6f7;border:1px solid var(--line);padding:1px 7px;border-radius:6px;white-space:nowrap}
+    nav.top{position:sticky;top:0;z-index:5;backdrop-filter:saturate(140%) blur(8px);
+      background:rgba(10,15,28,.72);border-bottom:1px solid var(--line-soft)}
+    nav.top .row{max-width:560px;margin:0 auto;padding:.85rem 1.25rem;display:flex;align-items:center;justify-content:space-between}
+    .brand{display:flex;align-items:center;gap:.55rem}
+    .logo-img{height:32px;width:auto;display:block;border-radius:8px}
+    .brand b{color:var(--ink);font-weight:700}
+    main{padding:2.4rem 0 3rem}
+    p.sub{color:var(--text);margin:.4rem 0 1.4rem}
+    .optin{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:1.3rem 1.35rem}
+    .optin label.fld{display:block;color:var(--ink);font-weight:600;font-size:.95rem;margin-bottom:.4rem}
+    .optin input[type=tel]{width:100%;background:var(--surface-2);border:1px solid var(--line);border-radius:10px;
+      color:var(--ink);font:inherit;font-size:1rem;padding:.7rem .85rem;outline:none}
+    .optin input[type=tel]:focus{border-color:var(--accent)}
+    .optin label.check{display:flex;gap:.6rem;align-items:flex-start;font-weight:400;color:var(--text);
+      font-size:.9rem;line-height:1.5;margin:1rem 0 0;cursor:pointer}
+    .optin label.check input{margin-top:.2rem;width:18px;height:18px;flex:0 0 auto;accent-color:var(--accent)}
+    .optin .links{margin:.85rem 0 0;font-size:.88rem;color:var(--muted)}
+    .optin button{margin-top:1rem;width:100%;background:var(--accent);color:var(--on-accent);border:none;
+      border-radius:10px;font:inherit;font-weight:700;font-size:1rem;padding:.75rem 1rem;cursor:pointer}
+    .optin button:disabled{opacity:.45;cursor:not-allowed}
+    .optin .fine{margin:.85rem 0 0;font-size:.8rem;color:var(--muted)}
+    .optin .result{margin:.85rem 0 0;font-size:.92rem;min-height:1.2em}
+    .optin .result.ok{color:var(--cyan)} .optin .result.err{color:var(--warn)}
+    footer{color:var(--muted);font-size:.86rem;margin-top:1.6rem}
+  </style>
+</head>
+<body>
+  <nav class="top">
+    <div class="row">
+      <a class="brand" href="/">
+        <img class="logo-img" src="https://assets.cotrackpro.com/CoTrackPro%2BLogo.jpg" alt="" />
+        <b>CoTrackPro</b>
+      </a>
+      <a href="https://cotrackpro.com">cotrackpro.com&nbsp;↗</a>
+    </div>
+  </nav>
+
+  <main>
+    <div class="wrap">
+      <span class="eyebrow">Sign up</span>
+      <h1>Get text reminders &amp; alerts</h1>
+      <p class="sub">Opt in to SMS from CoTrackPro Talk — verification codes, call notifications,
+        reminders, and account alerts. Reply <code>STOP</code> any time to cancel.</p>
+
+      <form class="optin" id="optin" novalidate>
+        <label class="fld" for="phone">Mobile number</label>
+        <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel"
+          placeholder="(555) 123-4567" aria-describedby="optin-fine" required />
+        <label class="check">
+          <input id="consent" name="consent" type="checkbox" />
+          <span>I agree to receive SMS from CoTrackPro Talk (verification codes, call notifications
+            and reminders, transcript and account alerts). Msg &amp; data rates may apply. Msg
+            frequency varies. Reply STOP to cancel, HELP for help.</span>
+        </label>
+        <div class="links">
+          <a href="https://cotrackpro.com/sms-consent" target="_blank" rel="noopener">SMS consent</a> ·
+          <a href="https://cotrackpro.com/privacy" target="_blank" rel="noopener">Privacy Policy</a> ·
+          <a href="https://cotrackpro.com/terms" target="_blank" rel="noopener">Terms</a>
+        </div>
+        <button id="optin-submit" type="submit" disabled>Opt in to texts</button>
+        <p class="fine" id="optin-fine">Consent is not a condition of purchase. Message frequency
+          varies. Msg &amp; data rates may apply.</p>
+        <p class="result" id="optin-result" role="status" aria-live="polite"></p>
+      </form>
+
+      <footer>Already opted in? Reply <code>HELP</code> to any message for help, or
+        <code>STOP</code> to cancel. &nbsp;·&nbsp; <a href="/">Back to overview</a></footer>
+    </div>
+  </main>
+
+  <script>
+  (function(){
+    var f=document.getElementById('optin');
+    if(!f) return;
+    var c=document.getElementById('consent'),
+        b=document.getElementById('optin-submit'),
+        p=document.getElementById('phone'),
+        out=document.getElementById('optin-result');
+    var CONSENT_TEXT="I agree to receive SMS from CoTrackPro Talk (verification codes, call notifications and reminders, transcript and account alerts). Msg & data rates may apply. Msg frequency varies. Reply STOP to cancel, HELP for help.";
+    function setResult(msg,kind){ out.textContent=msg||''; out.className='result'+(kind?(' '+kind):''); }
+    c.addEventListener('change',function(){ b.disabled=!c.checked; setResult(''); });
+    function toE164(v){
+      v=(v||'').trim();
+      if(/^\+[1-9]\d{7,14}$/.test(v)) return v;
+      var d=v.replace(/\D/g,'');
+      if(d.length===10) return '+1'+d;
+      if(d.length===11 && d.charAt(0)==='1') return '+'+d;
+      return null;
+    }
+    f.addEventListener('submit',function(e){
+      e.preventDefault();
+      if(!c.checked){ setResult('Please check the consent box to continue.','err'); return; }
+      var phone=toE164(p.value);
+      if(!phone){ setResult('Please enter a valid mobile number.','err'); return; }
+      b.disabled=true; b.textContent='Submitting…';
+      fetch('/api/consent',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({phone:phone,consent:true,consentText:CONSENT_TEXT,source:'web'})})
+        .then(function(r){ return r.json().catch(function(){return{};}).then(function(j){ return {ok:r.ok,j:j}; }); })
+        .then(function(res){
+          if(res.ok){ f.reset(); b.disabled=true; b.textContent='Opt in to texts';
+            setResult((res.j&&res.j.message)||'Thanks — you are opted in. Reply STOP anytime.','ok'); }
+          else { b.disabled=false; b.textContent='Opt in to texts';
+            setResult((res.j&&res.j.message)||'Something went wrong. Please try again.','err'); }
+        })
+        .catch(function(){ b.disabled=false; b.textContent='Opt in to texts';
+          setResult('Network error. Please try again.','err'); });
+    });
+  })();
+  </script>
+</body>
+</html>

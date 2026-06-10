@@ -378,6 +378,64 @@ HTTP tier on Vercel (stateless serverless, scales to zero, global edge), WebSock
 
 **Local development:** set `SERVER_DOMAIN=<ngrok-domain>` in `.env` and run `npm run dev`. This runs the full Fastify server (HTTP + WS) on one host — single-host mode. You don't need Vercel locally; `src/handlers/*` and `api/*` share the same `src/core/*` logic, so whatever works in dev will work on Vercel.
 
+### Custom domain (`talk.cotrackpro.com`)
+
+Production serves on `cotrackpro-talk.vercel.app` out of the box. To also serve on
+`talk.cotrackpro.com`, attach it to the Vercel project and add one DNS record at GoDaddy.
+
+1. **Add the domain to the Vercel project.**
+   - Dashboard: **Project → Settings → Domains → Add** `talk.cotrackpro.com`, or
+   - CLI (token-based — the project token is in SSM at `/cotrackpro/prod/vercel/api_token`):
+     ```bash
+     export VERCEL_TOKEN=$(aws ssm get-parameter --region us-east-1 \
+       --name /cotrackpro/prod/vercel/api_token --with-decryption \
+       --query Parameter.Value --output text)
+     export VERCEL_ORG_ID=team_DJXivUKK5Uf3elW5FQB3ZDJu
+     export VERCEL_PROJECT_ID=prj_ZHLtOAV6jtu1wV1jEmuyz2dPZUe2
+     vercel domains add talk.cotrackpro.com --token "$VERCEL_TOKEN"
+     ```
+   Vercel responds with the DNS record to create — for a subdomain this is normally:
+   ```
+   CNAME   talk   →   cname.vercel-dns.com
+   ```
+   _(Record returned by Vercel: **CNAME `talk` → `cname.vercel-dns.com`** — confirm in the
+   dashboard at add time and update here if Vercel returns a different target.)_
+
+2. **Create the DNS record in Route 53.** `cotrackpro.com`'s nameservers are **AWS Route 53**
+   (`*.awsdns-*` — confirm with `vercel domains inspect cotrackpro.com`), so the record goes there,
+   not GoDaddy (GoDaddy may be the registrar, but Route 53 serves the DNS):
+   ```bash
+   ZONE=$(aws route53 list-hosted-zones-by-name --dns-name cotrackpro.com --query "HostedZones[0].Id" --output text | sed 's#/hostedzone/##')
+   aws route53 change-resource-record-sets --hosted-zone-id "$ZONE" --change-batch '{
+     "Changes":[{"Action":"UPSERT","ResourceRecordSet":{
+       "Name":"talk.cotrackpro.com","Type":"CNAME","TTL":300,
+       "ResourceRecords":[{"Value":"cname.vercel-dns.com"}]}}]}'
+   ```
+   If `talk.cotrackpro.com` was already serving another Vercel project, the record likely already
+   exists — in that case only the project assignment needs to move (Vercel: account **Domains** →
+   `cotrackpro.com` → reassign `talk` to `cotrackpro-talk`).
+
+3. **Wait for DNS + Vercel's automatic TLS issuance** (usually minutes). Done when
+   `https://talk.cotrackpro.com` loads this app over HTTPS. The app auto-detects whichever
+   host Twilio/visitors use (`x-forwarded-host`), so no env change is needed — but you may
+   optionally set `API_DOMAIN=talk.cotrackpro.com` to make app-generated URLs use it.
+
+### Web SMS opt-in (public consent form)
+
+The landing page (`/`) and `/signup` host a **public, no-auth** SMS opt-in form — the
+publicly verifiable CTA the A2P campaign points at. It posts to `POST /api/consent`
+(`api/consent.ts` → `src/core/webConsent.ts`), which validates the number (E.164), requires
+the consent checkbox, light-rate-limits per client-IP hash, and records a durable
+proof-of-consent `{ phone, consentText, timestamp, source, ipHash }`. It **never sends an
+SMS** (the campaign isn't approved for that). The disclosure text in
+`WEB_SMS_CONSENT_TEXT` must stay verbatim-identical to the form and to
+`cotrackpro.com/sms-consent`.
+
+> **Durability:** records are written via the KV store with no TTL. With the default
+> in-memory backend that's per-instance only — set `KV_BACKEND=dynamo` (+ `KV_DYNAMO_TABLE`)
+> or Upstash for a durable, queryable consent log. Every opt-in is also written to the audit
+> log (`"web SMS consent recorded"`, masked number + `ipHash` + timestamp) regardless of backend.
+
 ### Latency optimization
 
 - ElevenLabs Flash v2.5 delivers ~75ms TTFB
