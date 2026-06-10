@@ -436,6 +436,39 @@ SMS** (the campaign isn't approved for that). The disclosure text in
 > or Upstash for a durable, queryable consent log. Every opt-in is also written to the audit
 > log (`"web SMS consent recorded"`, masked number + `ipHash` + timestamp) regardless of backend.
 
+### Deploy the voice tier (Fly.io)
+
+Inbound **voice** (a caller talks to the AI assistant) runs the live audio pipeline in
+`src/handlers/callHandler.ts` over the Twilio Media Stream WebSocket `/call/stream`. That
+WebSocket is long-lived and bidirectional, so it **cannot run on Vercel** — it needs an
+always-on host. We use Fly.io (`Dockerfile` + `fly.toml`, always-on, `/health` checked).
+Voice is independent of A2P/SMS compliance, so it's testable as soon as it's deployed.
+
+This is the **hybrid** topology (see Option B above): Vercel stays the HTTP edge
+(`/call/incoming` TwiML, `/call/status`, SMS, `/api/*`); Fly serves only the audio WebSocket.
+
+```bash
+# 1) One-time: install + auth flyctl, and ensure the app exists
+fly auth login
+fly apps create cotrackpro-talk          # skip if it already exists
+
+# 2) Deploy: mirror runtime secrets from SSM into Fly secrets, then deploy the image
+bash scripts/deploy-fly.sh               # reads /cotrackpro/prod/*, runs `flyctl deploy`
+
+# 3) Verify the voice host is up
+curl -sS https://cotrackpro-talk.fly.dev/health        # -> {"status":"ok",...}
+
+# 4) Point the Vercel edge at the Fly WebSocket, then redeploy Vercel
+printf '%s' 'cotrackpro-talk.fly.dev' | vercel env add WS_DOMAIN production
+vercel deploy --prod                     # /call/incoming TwiML now streams to Fly
+```
+
+After that, the Twilio number's `voiceUrl` (already `https://talk.cotrackpro.com/call/incoming`)
+returns TwiML pointing `<Stream>` at `wss://cotrackpro-talk.fly.dev/call/stream`, and **calling
+the number reaches the assistant.** Watch it with `fly logs` — you'll see the WebSocket connect,
+STT transcripts, Claude streaming, and TTS. `scripts/deploy-fly.sh` self-checks `flyctl` auth +
+AWS creds and fails fast with guidance if either is missing.
+
 ### Latency optimization
 
 - ElevenLabs Flash v2.5 delivers ~75ms TTFB
