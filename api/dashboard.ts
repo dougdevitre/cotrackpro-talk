@@ -30,6 +30,7 @@ const HTML = `<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CoTrackPro Voice Center — Admin</title>
+  <link rel="icon" href="https://assets.cotrackpro.com/CoTrackPro%2BLogo.jpg">
   <style>
     :root {
       --bg: #0f172a;
@@ -165,7 +166,12 @@ const HTML = `<!doctype html>
 </head>
 <body>
   <header>
-    <h1>CoTrackPro Voice Center — Admin</h1>
+    <h1 style="display:flex;align-items:center;gap:.55rem">
+      <img src="https://assets.cotrackpro.com/CoTrackPro%2BLogo.jpg" alt=""
+        style="height:28px;width:auto;border-radius:5px"
+        onerror="this.style.display='none'">
+      CoTrackPro Voice Center — Admin
+    </h1>
     <div class="status-row">
       <span id="health-status"><span class="dot"></span>health: —</span>
       <span id="last-refresh">—</span>

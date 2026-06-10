@@ -6,6 +6,8 @@
   <meta name="robots" content="noindex" />
   <title>CoTrackPro · Calls &amp; Texts</title>
   <meta name="description" content="The calls-and-texts companion to CoTrackPro: gentle reminders, two-way texting, and a calm voice line for families navigating high-conflict separation." />
+  <link rel="icon" href="https://assets.cotrackpro.com/CoTrackPro%2BLogo.jpg" />
+  <link rel="apple-touch-icon" href="https://assets.cotrackpro.com/CoTrackPro%2BLogo.jpg" />
   <style>
     :root{
       --bg:#f6f5f1; --surface:#ffffff; --ink:#1f2933; --muted:#5b6b73;
@@ -27,10 +29,13 @@
 
     /* Hero */
     header.hero{background:linear-gradient(180deg,#eef4f3,var(--bg));border-bottom:1px solid var(--line)}
-    .brand{display:flex;align-items:center;gap:.6rem;padding:1.4rem 0 .2rem}
-    .logo{width:34px;height:34px;border-radius:9px;background:var(--primary);color:#fff;
+    .brand{display:flex;align-items:center;gap:.55rem;padding:1.3rem 0 .2rem}
+    .logo-img{height:40px;width:auto;display:block;border-radius:8px}
+    /* Text wordmark — shown only if the remote logo image fails to load. */
+    .wordmark{display:flex;align-items:center;gap:.5rem}
+    .wordmark .logo{width:34px;height:34px;border-radius:9px;background:var(--primary);color:#fff;
       display:grid;place-items:center;font-weight:700;font-size:1rem;letter-spacing:.02em}
-    .brand b{font-size:1.05rem}
+    .wordmark b{font-size:1.05rem}
     .hero-body{padding:1.2rem 0 2.4rem}
     .hero-body h1{font-size:2rem;letter-spacing:-.01em;margin:.4rem 0 .6rem}
     .hero-body p.lead{font-size:1.12rem;color:var(--muted);max-width:42rem;margin:0}
@@ -85,8 +90,13 @@
   <header class="hero">
     <div class="wrap">
       <div class="brand">
-        <span class="logo" aria-hidden="true">CT</span>
-        <b>CoTrackPro</b><span class="muted">· Calls &amp; Texts</span>
+        <img class="logo-img" src="https://assets.cotrackpro.com/CoTrackPro%2BLogo.jpg"
+          alt="CoTrackPro"
+          onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" />
+        <span class="wordmark" style="display:none" aria-hidden="true">
+          <span class="logo">CT</span><b>CoTrackPro</b>
+        </span>
+        <span class="muted">· Calls &amp; Texts</span>
       </div>
       <div class="hero-body">
         <span class="tag">Part of your CoTrackPro account</span>
