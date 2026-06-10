@@ -361,6 +361,40 @@ describe("buildSignedWebhookUrl (M-2)", () => {
     assert.equal(url, "https://api.example.com/call/incoming");
   });
 
+  it("prefers the actual host (x-forwarded-host) over the configured apiDomain", () => {
+    // The real-world bug: apiDomain auto-detects to the long canonical
+    // VERCEL_PROJECT_PRODUCTION_URL, but Twilio called — and signed —
+    // the short alias. When the handler passes the real host, it must
+    // win so the reconstructed URL matches the signature.
+    const url = buildSignedWebhookUrl(
+      "/api/sms/incoming",
+      "/sms/incoming",
+      "cotrackpro-talk-dougdevitres-projects.vercel.app", // apiDomain
+      "cotrackpro-talk.vercel.app", // host Twilio actually called
+    );
+    assert.equal(url, "https://cotrackpro-talk.vercel.app/sms/incoming");
+  });
+
+  it("falls back to apiDomain when no host is supplied", () => {
+    const url = buildSignedWebhookUrl(
+      "/api/sms/incoming",
+      "/sms/incoming",
+      "api.example.com",
+      undefined,
+    );
+    assert.equal(url, "https://api.example.com/sms/incoming");
+  });
+
+  it("host override still splices the query string", () => {
+    const url = buildSignedWebhookUrl(
+      "/api/call/incoming?role=parent",
+      "/call/incoming",
+      "configured.example.com",
+      "real.example.com",
+    );
+    assert.equal(url, "https://real.example.com/call/incoming?role=parent");
+  });
+
   it("end-to-end: signs against the helper's output, validates after rewrite", () => {
     // This is the actual regression guard. Pretend Twilio signed
     // the public URL; pretend Vercel rewrote req.url to the

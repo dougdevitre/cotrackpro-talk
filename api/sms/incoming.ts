@@ -39,6 +39,7 @@ import { forwardInboundSms, recordConsent } from "../../src/services/hub.js";
 import { logger } from "../../src/utils/logger.js";
 import {
   parseBody,
+  publicHost,
   requireMethod,
   sendStatus,
   sendXml,
@@ -70,7 +71,12 @@ export default async function handler(
   // the original query onto the hardcoded public path rather than reading
   // req.url (Vercel rewrites it to the internal /api path).
   const signature = req.headers["x-twilio-signature"] as string | undefined;
-  const fullUrl = buildSignedWebhookUrl(req.url, "/sms/incoming", env.apiDomain);
+  const fullUrl = buildSignedWebhookUrl(
+    req.url,
+    "/sms/incoming",
+    env.apiDomain,
+    publicHost(req),
+  );
   if (!validateTwilioSignature(signature, fullUrl, body)) {
     sendStatus(res, 403, "Forbidden");
     return;

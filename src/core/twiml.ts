@@ -108,18 +108,28 @@ export function validateTwilioSignature(
  *                     single-host mode. The path portion is DISCARDED.
  * @param publicPath   The public path Twilio signed (must begin with
  *                     "/"), e.g. "/call/incoming".
- * @param apiDomain    The public domain Twilio was pointed at, e.g.
- *                     env.apiDomain. No scheme prefix — we always use
- *                     https since Twilio requires it.
+ * @param apiDomain    Fallback public domain (e.g. env.apiDomain), used
+ *                     only when `host` is not supplied. No scheme prefix —
+ *                     we always use https since Twilio requires it.
+ * @param host         The host Twilio ACTUALLY called, from the request's
+ *                     x-forwarded-host / Host header. Twilio signs the URL
+ *                     it hit, which is the short public alias
+ *                     (cotrackpro-talk.vercel.app) — that can differ from a
+ *                     configured/auto-detected apiDomain (e.g. the longer
+ *                     VERCEL_PROJECT_PRODUCTION_URL canonical form). When
+ *                     present, `host` wins so the reconstructed URL matches
+ *                     the signature byte-for-byte. Falls back to apiDomain.
  */
 export function buildSignedWebhookUrl(
   reqUrl: string | undefined,
   publicPath: string,
   apiDomain: string,
+  host?: string,
 ): string {
   const queryIdx = (reqUrl ?? "").indexOf("?");
   const query = queryIdx >= 0 ? (reqUrl as string).slice(queryIdx + 1) : "";
-  return `https://${apiDomain}${publicPath}${query ? `?${query}` : ""}`;
+  const authority = host || apiDomain;
+  return `https://${authority}${publicPath}${query ? `?${query}` : ""}`;
 }
 
 /**
