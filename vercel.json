@@ -23,6 +23,7 @@
     { "source": "/call/outbound", "destination": "/api/call/outbound" },
     { "source": "/call/voice-line", "destination": "/api/call/voice-line" },
     { "source": "/sms/incoming", "destination": "/api/sms/incoming" },
+    { "source": "/signup", "destination": "/signup.html" },
     { "source": "/health", "destination": "/api/health" },
     { "source": "/dashboard", "destination": "/api/dashboard" },
     { "source": "/records", "destination": "/api/records" },
