@@ -25,6 +25,10 @@
 #     /cotrackpro/<stage>/talk/*
 #     /cotrackpro/<stage>/twilio/*
 #     /cotrackpro/<stage>/elevenlabs/*
+#   Optionally (for the OPTIONAL_MAPPING tier below):
+#     /cotrackpro/<stage>/anthropic/*   (for ANTHROPIC_API_KEY)
+#   The optional tier is best-effort — if the credential can't read a param
+#   (NotFound or AccessDenied), it's skipped, never fatal.
 #
 # SECURITY: secret values are NEVER echoed. They are read into memory, then
 # piped to `vercel env add` via stdin — never passed as CLI args (so they
@@ -58,6 +62,19 @@ MAPPING=(
   "twilio/phone_number:TWILIO_PHONE_NUMBER"
   "elevenlabs/api_key:ELEVENLABS_API_KEY"
   "elevenlabs/voice_id_doug:ELEVENLABS_VOICE_ID_DOUG"
+)
+
+# OPTIONAL, app-local params — mirrored only IF they exist (best-effort; a
+# missing one is skipped with a warning and does NOT fail the sync). These are
+# NOT part of the shared hub registry; they're config this app needs that also
+# happens to live in SSM. The running credential needs read access to these
+# paths too (a CloudShell operator already has it; for CI, add them to the IAM
+# policy or set the env vars directly in the Vercel dashboard instead).
+#   anthropic/api_key  → ANTHROPIC_API_KEY  (env.ts requires it at boot)
+#   talk/server_domain → SERVER_DOMAIN      (this edge's own public host)
+OPTIONAL_MAPPING=(
+  "anthropic/api_key:ANTHROPIC_API_KEY"
+  "talk/server_domain:SERVER_DOMAIN"
 )
 
 # ── Preflight ───────────────────────────────────────────────────────────────
@@ -109,6 +126,26 @@ if [[ "$missing" -ne 0 ]]; then
   echo "ERROR: one or more REQUIRED parameters missing/empty — wrote nothing." >&2
   exit 1
 fi
+
+# Optional, best-effort tier — append any that exist; skip (don't fail) the rest.
+for entry in "${OPTIONAL_MAPPING[@]}"; do
+  suffix="${entry%%:*}"
+  name="${entry##*:}"
+  path="/cotrackpro/${STAGE}/${suffix}"
+
+  if value="$(aws ssm get-parameter \
+        --region "$REGION" \
+        --name "$path" \
+        --with-decryption \
+        --query 'Parameter.Value' \
+        --output text 2>/dev/null)" && [[ -n "$value" && "$value" != "None" ]]; then
+    NAMES+=("$name")
+    VALUES+=("$value")
+    echo "  fetch ${name} ... ok (optional)"
+  else
+    echo "  fetch ${name} ... skipped (optional; ${path} not set)"
+  fi
+done
 
 # ── Phase 2: write to Vercel, idempotently (replace if it exists) ────────────
 # Remove-then-add so a re-run yields the same env (true idempotency). The
