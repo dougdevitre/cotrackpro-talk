@@ -36,9 +36,23 @@ function optional(key: string, fallback: string): string {
 //
 // Either form is valid. If only SERVER_DOMAIN is set, API and WS both
 // resolve to it. If API_DOMAIN/WS_DOMAIN are set, they override.
+//
+//  3. Vercel auto-detect (fallback). On Vercel, the public production
+//     host is injected automatically as VERCEL_PROJECT_PRODUCTION_URL
+//     (e.g. "cotrackpro-talk.vercel.app"), with VERCEL_URL as the
+//     per-deployment URL. We fall back to those when no domain env var is
+//     set, so the HTTP API (and Twilio webhook signature checks, which
+//     must match the host Twilio called) work out of the box on Vercel
+//     without anyone hand-setting SERVER_DOMAIN. NOTE: the WS fallback to
+//     the Vercel host is only a placeholder — Vercel can't serve the
+//     bidirectional Media Stream, so inbound *voice* still needs an
+//     explicit WS_DOMAIN pointing at a long-running host. SMS and the
+//     one-shot <Play> voice path don't use the WS host, so they're fine.
+const _vercelDomain =
+  process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL || "";
 const _serverDomain = process.env.SERVER_DOMAIN || "";
-const _apiDomain = process.env.API_DOMAIN || _serverDomain;
-const _wsDomain = process.env.WS_DOMAIN || _serverDomain;
+const _apiDomain = process.env.API_DOMAIN || _serverDomain || _vercelDomain;
+const _wsDomain = process.env.WS_DOMAIN || _serverDomain || _vercelDomain;
 
 if (!_apiDomain) {
   throw new Error(
