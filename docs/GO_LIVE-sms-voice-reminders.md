@@ -16,6 +16,12 @@ documented in [`docs/hub-talk-seam.md`](./hub-talk-seam.md).
 > (2) the hub contract field names must match — see Step 8. Everything
 > else is config + compliance.
 
+> **Shortcut:** from an authenticated AWS CloudShell checkout, run
+> `npm run go-live` (`scripts/go-live.sh`) for a guided menu that runs the
+> SMS smoke test, wires Twilio, verifies the DynamoDB STOP row, tests a
+> voice call, and prints the Vercel env checklist. It does the AWS/Twilio
+> side directly; the Vercel env steps below still happen in the dashboard.
+
 ## Prerequisites
 
 - AWS CLI configured for `us-east-1` with `ssm:PutParameter` /
