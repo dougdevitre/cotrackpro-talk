@@ -436,6 +436,44 @@ SMS** (the campaign isn't approved for that). The disclosure text in
 > or Upstash for a durable, queryable consent log. Every opt-in is also written to the audit
 > log (`"web SMS consent recorded"`, masked number + `ipHash` + timestamp) regardless of backend.
 
+### Deploy the voice tier (AWS EC2)
+
+Inbound **voice** (a caller talks to the assistant) runs the live audio pipeline in
+`src/handlers/callHandler.ts` over the Twilio Media Stream WebSocket `/call/stream`. That
+WebSocket is long-lived and bidirectional, so it **cannot run on Vercel**, and **AWS App
+Runner doesn't support WebSockets** — it needs a small always-on host. We use one EC2 instance
+running the container behind **Caddy** (automatic Let's Encrypt TLS, transparent WS upgrade).
+Voice is independent of A2P/SMS compliance, so it's testable as soon as it's up.
+
+Hybrid topology (see Option B above): Vercel stays the HTTP edge (`/call/incoming` TwiML, SMS,
+`/api/*`); EC2 serves only the audio WebSocket at `wss://voice.cotrackpro.com/call/stream`.
+
+```bash
+# 1) Provision the instance, Elastic IP, and DNS (run from AWS CloudShell).
+#    Creates an IAM role (SSM-read), security group (80/443), a t3.small AL2023
+#    instance, and the Route 53 A record voice.cotrackpro.com. The instance's
+#    first-boot script (scripts/ec2-bootstrap.sh) builds the image from this repo,
+#    pulls secrets from SSM via its instance role, and runs the app + Caddy.
+bash scripts/deploy-ec2.sh
+
+# 2) Wait ~3-5 min (docker build + cert issuance), then verify:
+curl -sS https://voice.cotrackpro.com/health        # -> {"status":"ok",...}
+#    Debug if needed (no SSH key — uses SSM Session Manager):
+#      aws ssm start-session --target <instance-id>
+#      sudo cat /var/log/cotrackpro-bootstrap.log ; sudo docker logs app
+
+# 3) Point the Vercel edge at the EC2 WebSocket, then redeploy Vercel:
+printf '%s' 'voice.cotrackpro.com' | vercel env add WS_DOMAIN production
+vercel deploy --prod
+```
+
+After that, the Twilio number's `voiceUrl` (`https://talk.cotrackpro.com/call/incoming`) returns
+TwiML pointing `<Stream>` at `wss://voice.cotrackpro.com/call/stream`, and **calling the number
+reaches the assistant.** Watch it with `sudo docker logs -f app` on the box (via SSM Session
+Manager): you'll see the WebSocket connect, STT transcripts, Claude streaming, and TTS. Reboots
+survive (`--restart=always`; the Caddy cert is persisted in a Docker volume). Cost: ~$15/mo for
+the `t3.small` + Elastic IP.
+
 ### Latency optimization
 
 - ElevenLabs Flash v2.5 delivers ~75ms TTFB
