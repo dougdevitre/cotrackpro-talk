@@ -15,6 +15,7 @@
     "show:twilio": "tsx scripts/show-twilio-number.ts",
     "list:phones": "tsx scripts/list-phone-mappings.ts",
     "lint:config": "tsx scripts/lint-config.ts",
+    "go-live": "bash scripts/go-live.sh",
     "preflight": "npm run typecheck && npm test && npm run lint:config"
   },
   "engines": {
