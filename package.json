@@ -23,9 +23,9 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.1",
-    "@aws-sdk/client-dynamodb": "^3.1065.0",
-    "@aws-sdk/lib-dynamodb": "^3.1065.0",
-    "@clerk/backend": "^3.5.0",
+    "@aws-sdk/client-dynamodb": "^3.1068.0",
+    "@aws-sdk/lib-dynamodb": "^3.1068.0",
+    "@clerk/backend": "^3.7.0",
     "@fastify/formbody": "^8.0.2",
     "@fastify/websocket": "^11.0.1",
     "dotenv": "^17.4.2",
@@ -36,7 +36,7 @@
     "ws": "^8.21.0"
   },
   "devDependencies": {
-    "@types/node": "^25.9.0",
+    "@types/node": "^25.9.3",
     "@types/ws": "^8.5.13",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3"
