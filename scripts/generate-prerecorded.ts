@@ -34,6 +34,7 @@ import { dirname, resolve } from "node:path";
 import { DEFAULT_VOICE_MAP } from "../src/config/voices.js";
 import { parseInboundPhoneMap } from "../src/config/inboundPhoneMap.js";
 import type { CoTrackProRole } from "../src/types/index.js";
+import { getRoleGreeting } from "../src/audio/greetings.js";
 
 function greetingKey(role: string, voiceId: string): string {
   return `${role}__${voiceId}`;
@@ -43,68 +44,24 @@ function greetingKey(role: string, voiceId: string): string {
 const PROJECT_ROOT = process.cwd();
 
 // ── Fixed phrases to pre-generate ──────────────────────────────────────────
-// Keep in sync with getRoleGreeting() in src/handlers/callHandler.ts
-// and the error/hold messages used in the same file.
+// Greetings come from src/audio/greetings.ts (imported below). The error/hold
+// messages are still defined here and used by the same call handler.
 
 type GreetingTextMap = Record<CoTrackProRole, string>;
 
-const GREETING_TEXTS: GreetingTextMap = {
-  kid_teen:
-    "Hey there. Welcome to CoTrack Pro. " +
-    "This is a safe place where you can talk about what's going on. " +
-    "There are no wrong answers, and you can stop anytime you want. " +
-    "What's on your mind?",
-  parent:
-    "Welcome to CoTrack Pro. I'm here to help with documentation, " +
-    "safety planning, and co-parenting support. " +
-    "Everything we talk about today is on your terms, and we can go at your pace. " +
-    "How can I help you today?",
-  attorney:
-    "Welcome to CoTrack Pro. I'm ready to assist with documentation, " +
-    "case organization, and evidence support. " +
-    "How can I help you today?",
-  gal:
-    "Welcome to CoTrack Pro. I'm ready to assist with documentation, " +
-    "case organization, and evidence support. " +
-    "How can I help you today?",
-  judge:
-    "Welcome to CoTrack Pro. I'm ready to assist with documentation, " +
-    "case organization, and evidence support. " +
-    "How can I help you today?",
-  therapist:
-    "Welcome to CoTrack Pro. I'm here to support your documentation " +
-    "and help organize observations. " +
-    "What are you working on today?",
-  social_worker:
-    "Welcome to CoTrack Pro. I'm here to support your documentation " +
-    "and help organize observations. " +
-    "What are you working on today?",
-  school_counselor:
-    "Welcome to CoTrack Pro. I'm here to support your documentation " +
-    "and help organize observations. " +
-    "What are you working on today?",
-  advocate:
-    "Welcome to CoTrack Pro. I'm here to support your work " +
-    "with safety planning, documentation, and resource connection. " +
-    "How can I help today?",
-  // Roles without a custom greeting use the default
-  law_enforcement:
-    "Welcome to CoTrack Pro. I'm here to help with documentation, " +
-    "safety planning, and co-parenting support. " +
-    "How can I help you today?",
-  mediator:
-    "Welcome to CoTrack Pro. I'm here to help with documentation, " +
-    "safety planning, and co-parenting support. " +
-    "How can I help you today?",
-  cps:
-    "Welcome to CoTrack Pro. I'm here to help with documentation, " +
-    "safety planning, and co-parenting support. " +
-    "How can I help you today?",
-  evaluator:
-    "Welcome to CoTrack Pro. I'm here to help with documentation, " +
-    "safety planning, and co-parenting support. " +
-    "How can I help you today?",
-};
+// Derived from src/audio/greetings.ts rather than duplicated here. The two used
+// to be hand-synced copies, so an edit to the spoken greeting could render to
+// cached audio that still said the old thing — including the transcription
+// disclosure. Importing removes that failure mode entirely.
+const ALL_ROLES: CoTrackProRole[] = [
+  "parent", "attorney", "gal", "judge", "therapist", "school_counselor",
+  "law_enforcement", "mediator", "advocate", "kid_teen", "social_worker",
+  "cps", "evaluator",
+];
+
+const GREETING_TEXTS: GreetingTextMap = Object.fromEntries(
+  ALL_ROLES.map((role) => [role, getRoleGreeting(role)]),
+) as GreetingTextMap;
 
 const HOLD_TEXT = "I'm working on that for you right now. I'm still here.";
 
