@@ -70,6 +70,7 @@ import {
   ERROR_TOOL_TEXT,
   greetingKey,
 } from "../audio/prerecorded.js";
+import { getRoleGreeting } from "../audio/greetings.js";
 // estimateCallCost is now called from src/core/callCompletion.ts
 // (via finalizeCallCompletion). The direct import was removed as
 // part of Pass 3 of the callHandler refactor.
@@ -141,53 +142,6 @@ function defaultDeps(): CallHandlerDeps {
   };
 }
 
-// ── Role-adaptive, trauma-informed greetings ─────────────────────────────────
-function getRoleGreeting(role: CoTrackProRole): string {
-  switch (role) {
-    case "kid_teen":
-      return (
-        "Hey there. Welcome to CoTrack Pro. " +
-        "This is a safe place where you can talk about what's going on. " +
-        "There are no wrong answers, and you can stop anytime you want. " +
-        "What's on your mind?"
-      );
-    case "parent":
-      return (
-        "Welcome to CoTrack Pro. I'm here to help with documentation, " +
-        "safety planning, and co-parenting support. " +
-        "Everything we talk about today is on your terms, and we can go at your pace. " +
-        "How can I help you today?"
-      );
-    case "attorney":
-    case "gal":
-    case "judge":
-      return (
-        "Welcome to CoTrack Pro. I'm ready to assist with documentation, " +
-        "case organization, and evidence support. " +
-        "How can I help you today?"
-      );
-    case "therapist":
-    case "social_worker":
-    case "school_counselor":
-      return (
-        "Welcome to CoTrack Pro. I'm here to support your documentation " +
-        "and help organize observations. " +
-        "What are you working on today?"
-      );
-    case "advocate":
-      return (
-        "Welcome to CoTrack Pro. I'm here to support your work " +
-        "with safety planning, documentation, and resource connection. " +
-        "How can I help today?"
-      );
-    default:
-      return (
-        "Welcome to CoTrack Pro. I'm here to help with documentation, " +
-        "safety planning, and co-parenting support. " +
-        "How can I help you today?"
-      );
-  }
-}
 
 // ── Sentence boundary detection for natural TTS pacing ──────────────────────
 // Previously this file declared a SENTENCE_END regex + a
