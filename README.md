@@ -230,7 +230,27 @@ In the Twilio Console:
    - **HTTP Method**: POST
 3. Optionally set **Status Callback URL**: `https://your-domain.ngrok-free.app/call/status`
 
-### 6. Test
+### 6. Check Parameter Store
+
+SSM is the single source of truth for config; nothing reads it at runtime, so values are pushed to Fly (`fly-deploy.yml`) and Vercel (`scripts/sync-ssm-to-vercel.sh`) at deploy time. Audit what's there before deploying:
+
+```bash
+./scripts/ssm-params.sh                    # audit /cotrackpro/prod/*, writes nothing
+./scripts/ssm-params.sh create             # prompt for MISSING params only
+./scripts/ssm-params.sh create --from-env  # non-interactive, values from env vars
+```
+
+It never overwrites an existing parameter — `create` only writes names the audit just reported absent, and `put-parameter` is called without `--overwrite`. Secrets are read for *type*, not value, so the audit needs only `ssm:GetParameter` (no `kms:Decrypt`); values are shown only for non-secret `String` params. Run it from AWS CloudShell, which already has the credentials.
+
+Four parameters are easy to miss and each fails quietly rather than loudly:
+
+| Parameter | Symptom when missing |
+|---|---|
+| `talk/ws_domain` | `WS_DOMAIN` falls back to the Vercel host, which can't serve a media stream — **the call connects and goes silent** |
+| `voice/inbound_phone_map` | Every call answers in the stock default voice instead of yours |
+| `kv/url` + `kv/token` | SMS threads reset between messages (each Vercel instance keeps its own in-memory map) |
+
+### 7. Test
 
 Before dialling, run the preflight — it checks the whole chain a live call depends on and tells you exactly which link is broken:
 
@@ -284,7 +304,7 @@ Set `INBOUND_PHONE_VOICE_MAP` to a JSON object keyed by E.164 phone number to pi
 { "+13143948500": { "voiceId": "2ydcbtd5sJZRYFMNgMVZ", "role": "parent" } }
 ```
 
-Canonical source is AWS SSM at `/cotrackpro/<stage>/voice/inbound_phone_map`. The Fly WS tier picks it up via the deploy workflow; for the Vercel HTTP tier, set `INBOUND_PHONE_VOICE_MAP` from that value with `vercel env` (see `docs/GO_LIVE-inbound-voice.md`). The 7 shared registry secrets (Twilio/ElevenLabs/talk bearer) are mirrored separately by `scripts/sync-ssm-to-vercel.sh`. To point a Twilio number at this app's webhook programmatically, run `npm run configure:twilio -- +13143948500` (uses `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN` + `API_DOMAIN`).
+Canonical source is AWS SSM at `/cotrackpro/<stage>/voice/inbound_phone_map`. **Both** tiers now pick it up: the Fly WS tier via `fly-deploy.yml`, and the Vercel HTTP tier via `scripts/sync-ssm-to-vercel.sh`. Mirroring it to Vercel is what actually makes the override work — `/call/incoming` builds the TwiML that carries the `voiceId` parameter, and that handler runs on Vercel, not Fly. To point a Twilio number at this app's webhook programmatically, run `npm run configure:twilio -- +13143948500` (uses `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN` + `API_DOMAIN`).
 
 Go-live runbook: [`docs/GO_LIVE-inbound-voice.md`](docs/GO_LIVE-inbound-voice.md).
 
