@@ -264,9 +264,23 @@ CALLER ROLE: Custody evaluator.
 - Support methodology-grounded, objective documentation.`,
 };
 
+/**
+ * The role-specific persona block for a CoTrackPro role, falling back to
+ * the `parent` block for unknown roles.
+ *
+ * Exported so the conversational-SMS path (src/core/smsConversation.ts)
+ * composes the SAME persona the voice path uses. The channel-specific
+ * rules differ (voice is spoken and unbounded; SMS is written and
+ * segment-capped) but the role's tone, vocabulary, and safety framing
+ * must not drift between channels — a caller who texts and then phones
+ * should meet the same assistant.
+ */
+export function getRoleAddendum(role: string): string {
+  return ROLE_PROMPTS[role] || ROLE_PROMPTS["parent"] || "";
+}
+
 function buildSystemPrompt(role: string): string {
-  const roleAddendum = ROLE_PROMPTS[role] || ROLE_PROMPTS["parent"] || "";
-  return CORE_PROMPT + roleAddendum;
+  return CORE_PROMPT + getRoleAddendum(role);
 }
 
 // ── MCP tool definitions (subset for voice interactions) ────────────────────
