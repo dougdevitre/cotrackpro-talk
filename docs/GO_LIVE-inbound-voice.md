@@ -80,43 +80,61 @@ and re-run. **Do not sync.**
 
 ## Step 3 — Sync SSM → runtimes
 
-Two kinds of config land in the runtimes:
+Audit first — it reports every parameter both tiers read, and what
+breaks when one is absent:
 
-- **Shared registry secrets** (Twilio, ElevenLabs, the talk bearer) →
-  Vercel via `scripts/sync-ssm-to-vercel.sh`. It mirrors the 7 params
-  owned in the hub registry (`docs/ops/ssm-parameters.md`), fails closed,
-  and never echoes values:
+```bash
+./scripts/ssm-params.sh                 # audit, writes nothing
+./scripts/ssm-params.sh create          # fill only what's missing
+```
 
-  ```bash
-  ./scripts/sync-ssm-to-vercel.sh prod    # → Vercel production
-  ./scripts/sync-ssm-to-vercel.sh test    # → Vercel preview
-  ```
+Then push the values out. Nothing reads SSM at runtime:
 
-- **`INBOUND_PHONE_VOICE_MAP`** (this doc's subject) is NOT a registry
-  secret, so it is synced separately. The Fly WS tier picks it up from
-  SSM via the deploy workflow (`.github/workflows/fly-deploy.yml`). For
-  the Vercel HTTP tier, mirror the SSM value directly:
+```bash
+./scripts/sync-ssm-to-vercel.sh prod    # → Vercel production (needs VERCEL_TOKEN)
+./scripts/sync-ssm-to-vercel.sh test    # → Vercel preview
 
-  ```bash
-  val="$(aws ssm get-parameter --region us-east-1 \
-    --name /cotrackpro/prod/voice/inbound_phone_map \
-    --query Parameter.Value --output text)"
-  vercel env rm  INBOUND_PHONE_VOICE_MAP production --yes || true
-  printf '%s' "$val" | vercel env add INBOUND_PHONE_VOICE_MAP production
-  ```
+# Or, with a logged-in CLI instead of a token (`vercel login` once):
+bash scripts/push-env-login.sh prod
+```
+
+Both scripts mirror the same set: the shared registry secrets (Twilio,
+ElevenLabs, the talk bearer) plus a best-effort tier —
+`INBOUND_PHONE_VOICE_MAP`, `WS_DOMAIN`, `KV_URL`/`KV_TOKEN`,
+`ANTHROPIC_API_KEY`, `SERVER_DOMAIN`.
+
+> **This used to be a manual step, and skipping it was silent.**
+> `INBOUND_PHONE_VOICE_MAP` was mirrored to Fly by the deploy workflow
+> but had to be copied to Vercel by hand. Vercel is the tier that
+> matters here: `api/call/incoming.ts` builds the TwiML carrying the
+> `voiceId` parameter. Without it on Vercel the override does nothing
+> and every call answers in the role's default voice — no error, no log
+> line. Both sync scripts now carry it.
+
+`WS_DOMAIN` is in the same category and fails the same way: unset, it
+falls back to the Vercel host, so `<Stream>` points at a serverless
+function that cannot serve a media stream. The call connects, plays
+nothing, and hangs up.
 
 ## Step 4 — Redeploy
 
 ```bash
 vercel deploy --prod
-fly deploy   -a cotrackpro-ws
+fly deploy   -a cotrackpro-talk
 ```
 
 Verify the values landed:
 
 ```bash
 vercel env ls production | grep INBOUND_PHONE_VOICE_MAP
-fly secrets list -a cotrackpro-ws | grep INBOUND_PHONE_VOICE_MAP
+fly secrets list -a cotrackpro-talk | grep INBOUND_PHONE_VOICE_MAP
+```
+
+Then verify the whole chain end to end, which is stronger than checking
+that env vars exist:
+
+```bash
+npm run check:line -- +13143948500
 ```
 
 ## Step 5 — Regenerate prerecorded audio (when adding a new voice)
@@ -188,10 +206,9 @@ behavior. No code rollback needed.
 aws ssm put-parameter --region us-east-1 --type String --overwrite \
   --name /cotrackpro/prod/voice/inbound_phone_map --value '{}'
 
-# Re-mirror the (now-empty) map to Vercel; Fly picks it up on next deploy.
-vercel env rm  INBOUND_PHONE_VOICE_MAP production --yes || true
-printf '%s' '{}' | vercel env add INBOUND_PHONE_VOICE_MAP production
-vercel deploy --prod && fly deploy -a cotrackpro-ws
+# Re-mirror to both tiers, then redeploy.
+bash scripts/push-env-login.sh prod     # or ./scripts/sync-ssm-to-vercel.sh prod
+fly deploy -a cotrackpro-talk
 ```
 
 ## Quick reference: operator commands
@@ -205,5 +222,9 @@ vercel deploy --prod && fly deploy -a cotrackpro-ws
 | `npm run configure:twilio -- +<E164>`     | set Twilio voice webhook on a number                |
 | `npm run show:twilio -- +<E164>`          | read back current Twilio config for a number        |
 | `npm run generate-audio`                  | regenerate the prerecorded greeting/hold/error cache|
-| `./scripts/sync-ssm-to-vercel.sh prod`    | mirror the 7 registry secrets → Vercel production   |
-| `./scripts/sync-ssm-to-vercel.sh test`    | mirror the 7 registry secrets → Vercel preview      |
+| `npm run check:line -- +<E164>`           | end-to-end preflight: Twilio, API, WS, voice, SMS   |
+| `./scripts/ssm-params.sh`                 | audit every SSM parameter both tiers read           |
+| `./scripts/ssm-params.sh create`          | create only the MISSING parameters (never overwrites)|
+| `./scripts/sync-ssm-to-vercel.sh prod`    | mirror SSM → Vercel production (needs `VERCEL_TOKEN`)|
+| `./scripts/sync-ssm-to-vercel.sh test`    | mirror SSM → Vercel preview                         |
+| `bash scripts/push-env-login.sh prod`     | same mirror via a logged-in `vercel` CLI, no token   |

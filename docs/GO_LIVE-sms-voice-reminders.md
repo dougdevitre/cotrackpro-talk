@@ -5,7 +5,8 @@ Operator checklist for taking the reminder edge endpoints to production:
 - `POST /api/sms/send` — hub-composed outbound SMS
 - `POST /api/call/outbound` — one-shot outbound voice in Doug's voice
 - `GET  /call/voice-line` — Twilio fetches the rendered Doug audio
-- `POST /sms/incoming` — Twilio inbound webhook (STOP/START/HELP + forward)
+- `POST /sms/incoming` — Twilio inbound webhook (STOP/START/HELP, hub
+  commands, else a conversational reply)
 
 The code is implemented and unit-tested with Twilio + ElevenLabs mocked;
 this doc is the deploy-time runbook for the **config, wiring, compliance,
@@ -61,11 +62,13 @@ pre-existing — re-put only when rotating.
 
 ## Step 2 — Shared KV (MANDATORY) ⚠️
 
-The suppression list (STOP), idempotency (`dedupeKey`), and rate-limit
-counters live in the KV store (`src/services/kv.ts`). The default backend
-is **in-memory and per-process** — on Vercel serverless that means **an
-opt-out written on one request is invisible to the next**, and `dedupeKey`
-won't dedupe a retry. Pick ONE durable backend.
+The suppression list (STOP), idempotency (`dedupeKey`), rate-limit
+counters, and **conversational-SMS thread memory** live in the KV store
+(`src/services/kv.ts`). The default backend is **in-memory and
+per-process** — on Vercel serverless that means **an opt-out written on
+one request is invisible to the next**, `dedupeKey` won't dedupe a retry,
+and an SMS conversation forgets the previous message. Pick ONE durable
+backend.
 
 **Option A — DynamoDB (AWS-native, no third-party vendor):**
 
@@ -194,15 +197,26 @@ On a registered test number + your own phone:
    and that the body is verbatim (no doubled footer).
 2. **STOP** → confirm no more sends arrive and a repeat send returns
    `{ sid: "suppressed" }`; **START** → re-enabled; **HELP** → static
-   reply; a non-keyword → forwarded, hub reply returns with one footer.
-3. **Inbound signature** — confirm `/sms/incoming` accepts a real signed
+   reply; a hub command (`SNOOZE`, `CONFIRM`, `DEADLINES`, `LOG`,
+   `RESOURCES`, `SAFE`, `MENU`) → forwarded, hub reply returns with one
+   footer.
+3. **Conversational SMS** — text something in free text ("he showed up
+   two hours late again and the kids were upset"). Expect a real reply
+   in 1–3 sentences, with the opt-out footer on the FIRST reply of a
+   thread only. Then send a follow-up ("what should I write down?") and
+   confirm it lands **in context** — if it reads like a fresh
+   conversation, the KV backend isn't shared (Step 2) and every reply is
+   starting from scratch. Also text something crisis-flagged from a test
+   number and confirm 911 + 988 appear; that line is guaranteed
+   independently of the model.
+4. **Inbound signature** — confirm `/sms/incoming` accepts a real signed
    Twilio request (a 403 here means `API_DOMAIN`/rewrite mismatch, not a
    bug in the keyword logic).
-4. **Outbound voice** — place a call with `consent:true`; confirm **Doug
+5. **Outbound voice** — place a call with `consent:true`; confirm **Doug
    audio actually plays**. This is the only path with zero mocked-test
    coverage: it exercises the ElevenLabs render + `/call/voice-line`
    fetch + the audio cache end-to-end.
-5. Confirm `https://$API_DOMAIN/call/voice-line?id=…` returns
+6. Confirm `https://$API_DOMAIN/call/voice-line?id=…` returns
    `audio/mpeg` (Twilio fetches it unauthenticated; the signed token is
    the only protection).
 

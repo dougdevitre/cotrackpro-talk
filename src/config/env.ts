@@ -166,6 +166,33 @@ export const env = {
   smsRateLimitPerMin: parseInt(optional("SMS_RATE_LIMIT_PER_MIN", "30"), 10),
   smsRateLimitPerHour: parseInt(optional("SMS_RATE_LIMIT_PER_HOUR", "500"), 10),
 
+  // ── Conversational inbound SMS (src/core/smsConversation.ts) ─────────
+  // When on, free-text inbound SMS gets a Claude reply in the same
+  // trauma-informed persona the phone line uses, with short-term thread
+  // memory. STOP/START/HELP and the hub's structured commands (CONFIRM,
+  // SNOOZE, DEADLINES, LOG, RESOURCES, SAFE) are handled BEFORE this and
+  // never reach the model. Set to "false" to fall back to the old
+  // forward-first-word-to-the-hub behavior.
+  smsAiEnabled: optional("SMS_AI_ENABLED", "true") === "true",
+  // Timeout on the reply generation. Twilio abandons a webhook that
+  // doesn't respond in ~15s, so this must leave room for the round trip
+  // plus the TwiML write.
+  smsAiTimeoutMs: parseInt(optional("SMS_AI_TIMEOUT_MS", "9000"), 10),
+  // Per-sender budget on model-backed replies. Bounds Anthropic + Twilio
+  // spend if the published number is flooded. A limited sender still gets
+  // a static reply (never silence).
+  smsAiRateLimitPerMin: parseInt(optional("SMS_AI_RATE_LIMIT_PER_MIN", "8"), 10),
+  smsAiRateLimitPerHour: parseInt(optional("SMS_AI_RATE_LIMIT_PER_HOUR", "60"), 10),
+  // Hard cap on outbound reply length. 480 chars ≈ 3 GSM-7 segments; the
+  // reply is trimmed at a sentence boundary where possible.
+  smsReplyMaxChars: parseInt(optional("SMS_REPLY_MAX_CHARS", "480"), 10),
+  // Generation cap. Deliberately tight — the prompt asks for 1-3 short
+  // sentences, and a low ceiling keeps a runaway generation from being
+  // paid for and then thrown away by the char cap.
+  smsReplyMaxTokens: parseInt(optional("SMS_REPLY_MAX_TOKENS", "300"), 10),
+  // How long a quiet SMS thread keeps its context before expiring.
+  smsThreadTtlSeconds: parseInt(optional("SMS_THREAD_TTL_SECONDS", "3600"), 10),
+
   // ── Outbound voice (hub → talk: POST /api/call/outbound) ─────────────
   // Hard per-UTC-day cap on one-shot outbound voice calls, on top of the
   // per-minute/per-hour limits. Doug's-voice reminder calls are a

@@ -70,11 +70,40 @@ MAPPING=(
 # happens to live in SSM. The running credential needs read access to these
 # paths too (a CloudShell operator already has it; for CI, add them to the IAM
 # policy or set the env vars directly in the Vercel dashboard instead).
-#   anthropic/api_key  → ANTHROPIC_API_KEY  (env.ts requires it at boot)
-#   talk/server_domain → SERVER_DOMAIN      (this edge's own public host)
+#
+# A suffix may list ALTERNATES separated by "|" — the first that exists wins.
+# That's used for the Anthropic key, which fly-deploy.yml reads at
+# ai/anthropic/api_key while this script historically read anthropic/api_key.
+# Trying both keeps a deploy working whichever path the account populated;
+# `./scripts/ssm-params.sh check` flags the drift so it gets normalized.
+#
+#   ai/anthropic/api_key    → ANTHROPIC_API_KEY  (env.ts requires it at boot)
+#   talk/server_domain      → SERVER_DOMAIN      (this edge's own public host)
+#   talk/ws_domain          → WS_DOMAIN          (the long-running WS host)
+#   voice/inbound_phone_map → INBOUND_PHONE_VOICE_MAP
+#   kv/url + kv/token       → KV_URL / KV_TOKEN  (shared KV backend)
+#
+# WHY ws_domain AND inbound_phone_map MATTER HERE: both are consumed by
+# api/call/incoming.ts, which runs on VERCEL. fly-deploy.yml already pushes
+# the phone map to the Fly tier, but the Fly tier isn't what builds the
+# TwiML — Vercel is. Without these two mirrored:
+#   - WS_DOMAIN falls back to the Vercel host, so <Stream> points at a
+#     serverless function that cannot serve a media stream. The call
+#     connects, plays nothing, and hangs up.
+#   - the per-number voice/role override never applies, so every call
+#     answers in the stock default voice.
+#
+# KV_URL/KV_TOKEN back the conversational-SMS thread memory (plus rate
+# limits and idempotency). Without a SHARED backend, each Vercel instance
+# keeps its own in-memory map and an SMS thread loses context between
+# messages.
 OPTIONAL_MAPPING=(
-  "anthropic/api_key:ANTHROPIC_API_KEY"
+  "ai/anthropic/api_key|anthropic/api_key:ANTHROPIC_API_KEY"
   "talk/server_domain:SERVER_DOMAIN"
+  "talk/ws_domain:WS_DOMAIN"
+  "voice/inbound_phone_map:INBOUND_PHONE_VOICE_MAP"
+  "kv/url:KV_URL"
+  "kv/token:KV_TOKEN"
 )
 
 # ── Preflight ───────────────────────────────────────────────────────────────
@@ -127,23 +156,36 @@ if [[ "$missing" -ne 0 ]]; then
   exit 1
 fi
 
-# Optional, best-effort tier — append any that exist; skip (don't fail) the rest.
+# Optional, best-effort tier — append any that exist; skip (don't fail) the
+# rest. A suffix may list "|"-separated alternates; the first that resolves
+# wins (see the OPTIONAL_MAPPING comment above).
 for entry in "${OPTIONAL_MAPPING[@]}"; do
-  suffix="${entry%%:*}"
+  suffixes="${entry%%:*}"
   name="${entry##*:}"
-  path="/cotrackpro/${STAGE}/${suffix}"
 
-  if value="$(aws ssm get-parameter \
-        --region "$REGION" \
-        --name "$path" \
-        --with-decryption \
-        --query 'Parameter.Value' \
-        --output text 2>/dev/null)" && [[ -n "$value" && "$value" != "None" ]]; then
+  value=""
+  resolved=""
+  IFS='|' read -ra candidates <<<"$suffixes"
+  for cand in "${candidates[@]}"; do
+    path="/cotrackpro/${STAGE}/${cand}"
+    if value="$(aws ssm get-parameter \
+          --region "$REGION" \
+          --name "$path" \
+          --with-decryption \
+          --query 'Parameter.Value' \
+          --output text 2>/dev/null)" && [[ -n "$value" && "$value" != "None" ]]; then
+      resolved="$cand"
+      break
+    fi
+    value=""
+  done
+
+  if [[ -n "$resolved" ]]; then
     NAMES+=("$name")
     VALUES+=("$value")
-    echo "  fetch ${name} ... ok (optional)"
+    echo "  fetch ${name} ... ok (optional, from ${resolved})"
   else
-    echo "  fetch ${name} ... skipped (optional; ${path} not set)"
+    echo "  fetch ${name} ... skipped (optional; /cotrackpro/${STAGE}/${candidates[0]} not set)"
   fi
 done
 

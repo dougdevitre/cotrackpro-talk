@@ -54,6 +54,9 @@ cotrackpro-voice-center/
 │   │   ├── incoming.ts             # POST /call/incoming  (TwiML)
 │   │   ├── status.ts               # POST /call/status    (callback)
 │   │   └── outbound.ts             # POST /call/outbound  (initiate call)
+│   ├── sms/
+│   │   ├── incoming.ts             # POST /sms/incoming   (consent + conversation)
+│   │   └── send.ts                 # POST /api/sms/send   (hub → talk)
 │   ├── cron/
 │   │   └── cost-rollup.ts          # Vercel Cron target (daily 06:00 UTC)
 │   └── records/
@@ -90,6 +93,9 @@ cotrackpro-voice-center/
     │   ├── phoneValidation.ts     # E.164 + country allow-list
     │   ├── rateLimit.ts            # Fixed-window rate limiter
     │   ├── records.ts              # DynamoDB record CRUD
+    │   ├── consent.ts              # SMS STOP/START/HELP + suppression list
+    │   ├── sms.ts                  # Outbound SMS send (hub → talk)
+    │   ├── smsConversation.ts      # Conversational inbound SMS (Claude + thread memory)
     │   └── twiml.ts                # TwiML + Twilio signature validation
     ├── types/
     │   └── index.ts                # Shared TypeScript types
@@ -224,9 +230,48 @@ In the Twilio Console:
    - **HTTP Method**: POST
 3. Optionally set **Status Callback URL**: `https://your-domain.ngrok-free.app/call/status`
 
-### 6. Test
+### 6. Check Parameter Store
 
-Call your Twilio number. You should hear the CoTrackPro greeting in the assigned ElevenLabs voice.
+SSM is the single source of truth for config; nothing reads it at runtime, so values are pushed to Fly (`fly-deploy.yml`) and Vercel (`scripts/sync-ssm-to-vercel.sh`) at deploy time. Audit what's there before deploying:
+
+```bash
+./scripts/ssm-params.sh                    # audit /cotrackpro/prod/*, writes nothing
+./scripts/ssm-params.sh create             # prompt for MISSING params only
+./scripts/ssm-params.sh create --from-env  # non-interactive, values from env vars
+```
+
+It never overwrites an existing parameter — `create` only writes names the audit just reported absent, and `put-parameter` is called without `--overwrite`. Secrets are read for *type*, not value, so the audit needs only `ssm:GetParameter` (no `kms:Decrypt`); values are shown only for non-secret `String` params. Run it from AWS CloudShell, which already has the credentials.
+
+Four parameters are easy to miss and each fails quietly rather than loudly:
+
+| Parameter | Symptom when missing |
+|---|---|
+| `talk/ws_domain` | `WS_DOMAIN` falls back to the Vercel host, which can't serve a media stream — **the call connects and goes silent** |
+| `voice/inbound_phone_map` | Every call answers in the stock default voice instead of yours |
+| `kv/url` + `kv/token` | SMS threads reset between messages (each Vercel instance keeps its own in-memory map) |
+
+### 7. Test
+
+Before dialling, run the preflight — it checks the whole chain a live call depends on and tells you exactly which link is broken:
+
+```bash
+npm run check:line -- +13143948500
+```
+
+It verifies:
+
+- the Twilio number's voice/SMS/status webhooks point at this deployment (and, when the number is in an A2P Messaging Service, that the **service's** inbound URL is right — it overrides the number-level `smsUrl`)
+- the API host answers `/health` and returns TwiML that streams to your WS host
+- the **WebSocket host** accepts a handshake on `/call/stream` — this is the usual reason a number "answers and then goes silent", because Vercel cannot serve the media stream
+- the role + ElevenLabs voice this number will answer in, and that the voice id actually resolves under `ELEVENLABS_API_KEY`
+- that conversational SMS is on and its thread memory has a shared KV backend
+
+Exit code is 0 when the line is callable, 1 on any hard failure. Warnings (⚠) flag cost/quality issues, not breakage.
+
+Then:
+
+- **Call** the number — you should hear the CoTrackPro greeting in the assigned ElevenLabs voice, then just talk. It's a full duplex conversation (barge-in supported): speech → ElevenLabs Scribe → Claude → ElevenLabs TTS, streamed sentence by sentence.
+- **Text** the number — say something real, like "he showed up two hours late again and the kids were upset". You get a conversational reply, and a follow-up text lands in the same thread.
 
 ## API Endpoints
 
@@ -236,6 +281,8 @@ Call your Twilio number. You should hear the CoTrackPro greeting in the assigned
 | WS | `/call/stream` | Bidirectional media stream (Twilio ↔ server) |
 | POST | `/call/outbound` | Initiate outbound call: `{ "to": "+15551234567", "role": "attorney" }`. E.164 format + country allow-list enforced. Send `Idempotency-Key: <uuid>` to make retries safe — the same key replays the cached response for 24 hours. |
 | POST | `/call/status` | Call status callbacks from Twilio |
+| POST | `/sms/incoming` | Twilio inbound-SMS webhook — STOP/START/HELP, hub commands, else a conversational reply |
+| POST | `/api/sms/send` | Hub → talk SMS delivery through our Twilio number (Bearer-auth, idempotent on `dedupeKey`) |
 | GET | `/records` | List recent call records (paginated, Bearer-auth) |
 | GET | `/records/:callSid` | Get a single call record |
 | GET | `/records/by-role/:role` | List calls for a persona |
@@ -257,9 +304,33 @@ Set `INBOUND_PHONE_VOICE_MAP` to a JSON object keyed by E.164 phone number to pi
 { "+13143948500": { "voiceId": "2ydcbtd5sJZRYFMNgMVZ", "role": "parent" } }
 ```
 
-Canonical source is AWS SSM at `/cotrackpro/<stage>/voice/inbound_phone_map`. The Fly WS tier picks it up via the deploy workflow; for the Vercel HTTP tier, set `INBOUND_PHONE_VOICE_MAP` from that value with `vercel env` (see `docs/GO_LIVE-inbound-voice.md`). The 7 shared registry secrets (Twilio/ElevenLabs/talk bearer) are mirrored separately by `scripts/sync-ssm-to-vercel.sh`. To point a Twilio number at this app's webhook programmatically, run `npm run configure:twilio -- +13143948500` (uses `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN` + `API_DOMAIN`).
+Canonical source is AWS SSM at `/cotrackpro/<stage>/voice/inbound_phone_map`. **Both** tiers now pick it up: the Fly WS tier via `fly-deploy.yml`, and the Vercel HTTP tier via `scripts/sync-ssm-to-vercel.sh`. Mirroring it to Vercel is what actually makes the override work — `/call/incoming` builds the TwiML that carries the `voiceId` parameter, and that handler runs on Vercel, not Fly. To point a Twilio number at this app's webhook programmatically, run `npm run configure:twilio -- +13143948500` (uses `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN` + `API_DOMAIN`).
 
 Go-live runbook: [`docs/GO_LIVE-inbound-voice.md`](docs/GO_LIVE-inbound-voice.md).
+
+### Conversational SMS
+
+Texting the number is a conversation, not a menu. Inbound `/sms/incoming` routes in this order:
+
+| Inbound | Handled by | Why |
+|---|---|---|
+| `STOP` / `UNSUBSCRIBE` / `CANCEL` / `END` / `QUIT` | `src/core/consent.ts` | Carrier compliance is never delegated to a model. Also clears the stored thread. |
+| `START` / `UNSTOP` | `src/core/consent.ts` | Opt back in. |
+| `HELP` / `INFO` | `src/core/consent.ts` | Static reply, no hub or model call. |
+| `RESOURCES` `SAFE` `DEADLINES` `LOG` `CONFIRM` `SNOOZE` `MENU` | hub `/internal/v1/inbound-sms` | State-changing operations on the user's record — the hub owns them. |
+| anything else (free text) | `src/core/smsConversation.ts` | Claude, in the same trauma-informed persona the phone line uses. |
+
+Details that matter:
+
+- **Same persona across channels.** The role block is shared with the voice path via `getRoleAddendum()`, so someone who texts and then calls meets the same assistant. Only the channel rules differ (SMS is written, segment-capped, and re-readable).
+- **Per-number persona.** The `INBOUND_PHONE_VOICE_MAP` entry for the number that was texted selects the SMS role too — one number, one consistent assistant on both channels.
+- **Thread memory.** The last ~12 turns are held in the KV store under a SHA-256 hash of the sender's number (never the raw number), expiring after `SMS_THREAD_TTL_SECONDS`. On Vercel this needs a **shared** KV backend (`KV_URL`/`KV_TOKEN`, or `KV_BACKEND=dynamo`) — with the in-memory default each message can land on a different instance and the thread resets.
+- **Crisis floor.** A local pattern screen runs independently of the model. When it fires, the reply is guaranteed to carry 911 + 988 even if the generation times out, fails, or omits them.
+- **Never silence.** Model unreachable, timed out, or rate-limited → a static reply that still carries the crisis resources.
+- **Opt-out footer** is appended to the first reply of a thread, not to every message of a live back-and-forth. `STOP`/`HELP` remain honored on every message regardless.
+- **Cost bounds.** Replies are capped at `SMS_REPLY_MAX_CHARS` (≈3 segments), generation at `SMS_REPLY_MAX_TOKENS`, and each sender gets `SMS_AI_RATE_LIMIT_PER_MIN`/`_HOUR`. The ~4k-token persona prompt is cached per role.
+
+Set `SMS_AI_ENABLED=false` to fall back to forwarding the first word to the hub's keyword router.
 
 ## Production Deployment
 

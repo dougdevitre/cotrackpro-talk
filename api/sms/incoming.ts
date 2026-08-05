@@ -4,12 +4,19 @@
  * POST /sms/incoming — Twilio inbound-SMS webhook.
  *
  * Verifies the X-Twilio-Signature, then:
- *   - STOP/UNSUBSCRIBE/CANCEL/END/QUIT → suppress the number, record
- *     consent=opted_out with the hub, reply with an opt-out confirmation.
+ *   - STOP/UNSUBSCRIBE/CANCEL/END/QUIT → suppress the number, clear any
+ *     conversation thread, record consent=opted_out with the hub, reply
+ *     with an opt-out confirmation.
  *   - START/UNSTOP → unsuppress, record consent=opted_in, reply.
  *   - HELP/INFO → static help reply (no hub call).
- *   - anything else → forward to the hub /internal/v1/inbound-sms and
- *     return its reply (with the canonical opt-out footer) as TwiML.
+ *   - hub commands (RESOURCES, SAFE, DEADLINES, LOG, CONFIRM, SNOOZE,
+ *     MENU) → forward to the hub /internal/v1/inbound-sms and return its
+ *     reply (with the canonical opt-out footer) as TwiML. These are
+ *     state-changing operations on the user's record; the hub owns them.
+ *   - anything else (free text) → a conversational Claude reply in the
+ *     CoTrackPro persona, with short-term thread memory
+ *     (src/core/smsConversation.ts). Set SMS_AI_ENABLED=false to fall
+ *     back to forwarding the first word to the hub instead.
  *
  * The reply is returned as TwiML <Message>. Talk-composed replies get
  * the canonical opt-out footer appended exactly once; outbound hub
@@ -35,6 +42,12 @@ import {
   suppress,
   unsuppress,
 } from "../../src/core/consent.js";
+import {
+  clearThread,
+  generateSmsReply,
+  isHubCommand,
+} from "../../src/core/smsConversation.js";
+import { lookupInboundPhone } from "../../src/config/inboundPhoneMap.js";
 import { forwardInboundSms, recordConsent } from "../../src/services/hub.js";
 import { logger } from "../../src/utils/logger.js";
 import {
@@ -124,6 +137,9 @@ export default async function handler(
     // Suppress FIRST (talk owns the number), then best-effort record
     // consent with the hub so a hub hiccup never leaves us still sending.
     await suppress(from);
+    // An opt-out leaves nothing behind: drop any stored conversation
+    // context for this number rather than waiting out its TTL.
+    await clearThread(from);
     await recordConsent(from, "opted_out", "STOP");
     sendXml(res, 200, twimlMessage(STOP_REPLY));
     return;
@@ -142,12 +158,33 @@ export default async function handler(
     return;
   }
 
-  // Non-keyword: forward to the hub as { phone, keyword } — the hub is
-  // keyword-routed (RESOURCES/SAFE, DEADLINES, LOG, CONFIRM, SNOOZE, else a
-  // default menu), so it wants the SENDER as `phone` and the FIRST word as
-  // `keyword`. Relay its reply with the canonical footer; a 404 (number not
-  // linked) → no reply.
-  const firstWord = (body.Body ?? "").trim().split(/\s+/)[0] ?? "";
+  const text = body.Body ?? "";
+
+  // Free text → conversational reply. The hub's keyword router can only
+  // act on the FIRST WORD of a message, so routing "he showed up two
+  // hours late again" there discards everything the person actually
+  // said. Structured commands still go to the hub below.
+  if (env.smsAiEnabled && !isHubCommand(text)) {
+    // Per-number persona: the same INBOUND_PHONE_VOICE_MAP that pins a
+    // voice + role for inbound CALLS also selects the SMS persona, keyed
+    // on the CoTrackPro number that was texted. One number, one
+    // consistent assistant across both channels.
+    const role = lookupInboundPhone(body.To)?.role ?? "parent";
+    const result = await generateSmsReply({ from, body: text, role });
+    log.info(
+      { messageSid, source: result.source, role },
+      "Inbound SMS answered conversationally",
+    );
+    sendXml(res, 200, twimlMessage(result.text));
+    return;
+  }
+
+  // Structured hub command (or SMS_AI_ENABLED=false): forward to the hub
+  // as { phone, keyword } — the hub is keyword-routed (RESOURCES/SAFE,
+  // DEADLINES, LOG, CONFIRM, SNOOZE, else a default menu), so it wants
+  // the SENDER as `phone` and the FIRST word as `keyword`. Relay its
+  // reply with the canonical footer; a 404 (number not linked) → no reply.
+  const firstWord = text.trim().split(/\s+/)[0] ?? "";
   const forwarded = await forwardInboundSms({ phone: from, keyword: firstWord });
   const reply =
     forwarded.status === "ok" && forwarded.reply

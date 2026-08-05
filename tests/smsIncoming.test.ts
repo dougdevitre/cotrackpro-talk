@@ -20,6 +20,10 @@ import {
   _MemoryKvForTests as MemoryKv,
 } from "../src/services/kv.js";
 import { isSuppressed, suppress, OPT_OUT_FOOTER } from "../src/core/consent.js";
+import {
+  _setSmsCompleterForTests,
+  loadThread,
+} from "../src/core/smsConversation.js";
 import { _setHubFetchForTests } from "../src/services/hub.js";
 
 type Captured = { url: string; init: RequestInit };
@@ -43,6 +47,7 @@ function smsReq(params: Record<string, string>) {
 beforeEach(() => _setKvForTests(new MemoryKv()));
 afterEach(() => {
   _setHubFetchForTests(null);
+  _setSmsCompleterForTests(null);
   _resetKvForTests();
 });
 
@@ -144,15 +149,15 @@ describe("/sms/incoming — HELP", () => {
   });
 });
 
-describe("/sms/incoming — non-keyword forward", () => {
-  it("forwards to the hub and relays its reply with exactly one footer", async () => {
+describe("/sms/incoming — hub command forward", () => {
+  it("forwards a structured command and relays its reply with exactly one footer", async () => {
     const captured: Captured[] = [];
-    _setHubFetchForTests(stubFetch(200, { reply: "Thanks — rescheduled to 2pm." }, captured));
+    _setHubFetchForTests(stubFetch(200, { reply: "Rescheduled to 2pm." }, captured));
 
     const req = smsReq({
       From: "+15551230123",
       To: "+15559990000",
-      Body: "Can we move to the afternoon?",
+      Body: "SNOOZE 2pm",
       MessageSid: "SM9",
     });
     const { res, getStatus, getBody } = mockResponse();
@@ -164,10 +169,10 @@ describe("/sms/incoming — non-keyword forward", () => {
     // Hub contract: { phone: <sender>, keyword: <first word> } — NOT
     // { from, to, body, messageSid }.
     const fwdBody = JSON.parse(fwd!.init.body as string);
-    assert.deepEqual(fwdBody, { phone: "+15551230123", keyword: "Can" });
+    assert.deepEqual(fwdBody, { phone: "+15551230123", keyword: "SNOOZE" });
 
     const xml = getBody();
-    assert.match(xml, /Thanks — rescheduled to 2pm\./);
+    assert.match(xml, /Rescheduled to 2pm\./);
     assert.equal(xml.split(OPT_OUT_FOOTER).length - 1, 1, "exactly one footer");
   });
 
@@ -179,29 +184,80 @@ describe("/sms/incoming — non-keyword forward", () => {
     assert.equal(getStatus(), 200);
     assert.doesNotMatch(getBody(), /<Message>/);
   });
+});
 
-  it("forwards a bare 'Yes' to the hub (not treated as opt-in)", async () => {
+describe("/sms/incoming — conversational free text", () => {
+  it("answers free text with the model instead of the hub's keyword router", async () => {
     const captured: Captured[] = [];
-    _setHubFetchForTests(stubFetch(200, { reply: "Got it." }, captured));
+    _setHubFetchForTests(stubFetch(200, { reply: "unused menu" }, captured));
+    _setSmsCompleterForTests(async () => ({
+      text: "That sounds exhausting. Want to write down what happened?",
+      inputTokens: 12,
+      outputTokens: 9,
+    }));
 
-    const req = smsReq({ From: "+15551230123", To: "+15559990000", Body: "Yes" });
-    const { res, getStatus } = mockResponse();
+    const req = smsReq({
+      From: "+15551230123",
+      To: "+15559990000",
+      Body: "Can we move to the afternoon? He keeps changing the exchange time.",
+      MessageSid: "SM9",
+    });
+    const { res, getStatus, getBody } = mockResponse();
     await incomingSms(req, res);
 
     assert.equal(getStatus(), 200);
-    assert.ok(
+    assert.match(getBody(), /That sounds exhausting/);
+    assert.equal(
       captured.find((c) => c.url.endsWith("/internal/v1/inbound-sms")),
-      "a conversational 'Yes' must be forwarded, not consumed as START",
+      undefined,
+      "free text must not be reduced to a hub keyword",
     );
+  });
+
+  it("answers a bare 'Yes' conversationally (never consumed as START)", async () => {
+    _setSmsCompleterForTests(async () => ({
+      text: "Great — tell me what happened and when.",
+      inputTokens: 5,
+      outputTokens: 5,
+    }));
+
+    const req = smsReq({ From: "+15551230123", To: "+15559990000", Body: "Yes" });
+    const { res, getStatus, getBody } = mockResponse();
+    await incomingSms(req, res);
+
+    assert.equal(getStatus(), 200);
+    assert.match(getBody(), /tell me what happened/);
     assert.equal(await isSuppressed("+15551230123"), false);
   });
 
-  it("returns empty TwiML when the hub has no reply", async () => {
-    _setHubFetchForTests(stubFetch(200, {}));
+  it("still replies (safely) when the model is unavailable — never silence", async () => {
+    _setSmsCompleterForTests(async () => {
+      throw new Error("upstream down");
+    });
     const req = smsReq({ From: "+15551230123", To: "+15559990000", Body: "hello there" });
     const { res, getStatus, getBody } = mockResponse();
     await incomingSms(req, res);
+
     assert.equal(getStatus(), 200);
-    assert.doesNotMatch(getBody(), /<Message>/);
+    assert.match(getBody(), /<Message>/);
+    assert.match(getBody(), /988/, "the fallback still carries the crisis line");
+  });
+
+  it("STOP clears the conversation thread", async () => {
+    _setHubFetchForTests(stubFetch(200, {}));
+    _setSmsCompleterForTests(async () => ({
+      text: "I'm here. What's going on?",
+      inputTokens: 5,
+      outputTokens: 5,
+    }));
+
+    const from = "+15551230123";
+    const chat = smsReq({ From: from, To: "+15559990000", Body: "I need help documenting something" });
+    await incomingSms(chat, mockResponse().res);
+    assert.ok((await loadThread(from)).length > 0, "thread should exist after a chat");
+
+    const stop = smsReq({ From: from, To: "+15559990000", Body: "STOP" });
+    await incomingSms(stop, mockResponse().res);
+    assert.deepEqual(await loadThread(from), [], "STOP must leave no stored context");
   });
 });
