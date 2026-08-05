@@ -12,26 +12,141 @@
  *
  * USAGE:
  *   npm run check:line -- +13143948500
- *   npx tsx scripts/check-line.ts +13143948500
+ *   npm run check:line -- +13143948500 --api-domain talk.cotrackpro.com
+ *   npx tsx scripts/check-line.ts +13143948500 --stage test --no-ssm
  *
  * Exits 0 when the line is callable, 1 when any REQUIRED check fails.
  * Warnings (⚠) never fail the run — they flag things that degrade
  * quality or cost, not things that break the call.
  *
- * REQUIREMENTS:
- *   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, ELEVENLABS_API_KEY,
- *   API_DOMAIN (or SERVER_DOMAIN), WS_DOMAIN (or SERVER_DOMAIN)
+ * CONFIG: this reads the same env vars the app does
+ * (TWILIO_ACCOUNT_SID/AUTH_TOKEN, ELEVENLABS_API_KEY, ANTHROPIC_API_KEY,
+ * API_DOMAIN or SERVER_DOMAIN, WS_DOMAIN, INBOUND_PHONE_VOICE_MAP), but
+ * you should not have to hand-build a .env to run a preflight. Anything
+ * missing from the environment is hydrated from SSM
+ * (/cotrackpro/<stage>/*) via the aws CLI before the app modules load.
+ * Pass --no-ssm to skip that and use only the ambient env/.env.
+ *
+ * Because src/config/env.ts validates and freezes config at IMPORT time,
+ * every app module here is loaded through a dynamic import in loadApp(),
+ * AFTER hydration. A static import would evaluate env.ts before we had a
+ * chance to fill anything in — which is exactly the "Missing required env
+ * var: set API_DOMAIN" crash this avoids.
  */
 
 import "dotenv/config";
+import { execFileSync } from "node:child_process";
 import twilio from "twilio";
 import WebSocket from "ws";
-import { env } from "../src/config/env.js";
-import { getVoiceId } from "../src/config/voices.js";
-import { lookupInboundPhone } from "../src/config/inboundPhoneMap.js";
-import { GREETINGS_ULAW, greetingKey } from "../src/audio/prerecorded.js";
-import { getRoleGreeting } from "../src/audio/greetings.js";
 import type { CoTrackProRole } from "../src/types/index.js";
+
+// ── Late-bound app modules ────────────────────────────────────────────────────
+// Assigned by loadApp() after the env is hydrated. Declared with `!` because
+// every use is downstream of that call.
+
+type AppEnv = (typeof import("../src/config/env.js"))["env"];
+
+let env!: AppEnv;
+let getVoiceId!: (role: CoTrackProRole) => string;
+let lookupInboundPhone!: (
+  to: string | undefined,
+) => { voiceId: string; role: CoTrackProRole } | null;
+let GREETINGS_ULAW!: Record<string, string[]>;
+let greetingKey!: (role: string, voiceId: string) => string;
+let getRoleGreeting!: (role: CoTrackProRole) => string;
+
+async function loadApp(): Promise<void> {
+  ({ env } = await import("../src/config/env.js"));
+  ({ getVoiceId } = await import("../src/config/voices.js"));
+  ({ lookupInboundPhone } = await import("../src/config/inboundPhoneMap.js"));
+  ({ GREETINGS_ULAW, greetingKey } = await import("../src/audio/prerecorded.js"));
+  ({ getRoleGreeting } = await import("../src/audio/greetings.js"));
+}
+
+// ── SSM hydration ─────────────────────────────────────────────────────────────
+
+/**
+ * SSM suffix → env var. Mirrors the registry in scripts/ssm-params.sh and
+ * the mappings in the two sync scripts. Order matters for the Anthropic
+ * key: the canonical path is listed first and an already-set value is
+ * never overwritten, so `ai/anthropic/api_key` wins over the legacy
+ * `anthropic/api_key` when an account somehow has both.
+ */
+const SSM_ENV_MAP: Array<[suffix: string, envName: string]> = [
+  ["twilio/account_sid", "TWILIO_ACCOUNT_SID"],
+  ["twilio/auth_token", "TWILIO_AUTH_TOKEN"],
+  ["twilio/phone_number", "TWILIO_PHONE_NUMBER"],
+  ["twilio/messaging_service_sid", "TWILIO_MESSAGING_SERVICE_SID"],
+  ["elevenlabs/api_key", "ELEVENLABS_API_KEY"],
+  ["elevenlabs/voice_id_doug", "ELEVENLABS_VOICE_ID_DOUG"],
+  ["ai/anthropic/api_key", "ANTHROPIC_API_KEY"],
+  ["anthropic/api_key", "ANTHROPIC_API_KEY"],
+  ["talk/outbound_api_key", "TALK_OUTBOUND_API_KEY"],
+  ["talk/server_domain", "SERVER_DOMAIN"],
+  ["talk/ws_domain", "WS_DOMAIN"],
+  ["voice/inbound_phone_map", "INBOUND_PHONE_VOICE_MAP"],
+  ["kv/url", "KV_URL"],
+  ["kv/token", "KV_TOKEN"],
+];
+
+/**
+ * Fill any UNSET env vars from SSM. Best-effort by design: no aws CLI, no
+ * credentials, or a denied read all degrade to "use whatever the ambient
+ * env has" rather than aborting — the preflight's job is to report what's
+ * wrong, and failing to start is a worse report than a partial one.
+ *
+ * Returns the env var names it filled (never their values).
+ */
+function hydrateFromSsm(stage: string, region: string): string[] {
+  const filled: string[] = [];
+  let raw = "";
+  try {
+    // One paged call for the whole namespace beats 14 round trips.
+    raw = execFileSync(
+      "aws",
+      [
+        "ssm",
+        "get-parameters-by-path",
+        "--path",
+        `/cotrackpro/${stage}`,
+        "--recursive",
+        "--with-decryption",
+        "--region",
+        region,
+        "--query",
+        "Parameters[].[Name,Value]",
+        "--output",
+        "text",
+      ],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 30_000 },
+    );
+  } catch {
+    return filled;
+  }
+
+  const bySuffix = new Map<string, string>();
+  const prefix = `/cotrackpro/${stage}/`;
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    // `--output text` is TAB-separated; a value may itself contain tabs,
+    // so split only on the FIRST tab.
+    const tab = line.indexOf("\t");
+    if (tab < 0) continue;
+    const name = line.slice(0, tab);
+    const value = line.slice(tab + 1).trim();
+    if (!name.startsWith(prefix) || !value) continue;
+    bySuffix.set(name.slice(prefix.length), value);
+  }
+
+  for (const [suffix, envName] of SSM_ENV_MAP) {
+    if (process.env[envName]) continue; // ambient env / .env always wins
+    const value = bySuffix.get(suffix);
+    if (!value) continue;
+    process.env[envName] = value;
+    filled.push(envName);
+  }
+  return filled;
+}
 
 // ── Result plumbing ───────────────────────────────────────────────────────────
 
@@ -223,6 +338,10 @@ async function checkApiHost(): Promise<void> {
         : `${url} returned ${res.status}. Twilio can't fetch TwiML; calls will fail immediately.`,
     );
   }
+  // If /health itself was refused, the host is rejecting everything —
+  // a 403 on the webhook below then says nothing about signature
+  // validation, and reporting it as a pass would be a lie.
+  const hostRefusing = res.status === 401 || res.status === 403;
 
   // The webhook itself should exist and reject unsigned requests (or
   // accept them when validation is off). A 404 here means the rewrite
@@ -237,11 +356,18 @@ async function checkApiHost(): Promise<void> {
       "API host / call webhook",
       "POST /call/incoming returned 404 — the Vercel rewrite isn't live on this deployment.",
     );
-  } else if (hook.status === 403) {
-    pass(
-      "API host / call webhook",
-      "POST /call/incoming returned 403 — signature validation is ON and rejecting unsigned requests (correct).",
-    );
+  } else if (hook.status === 403 || hook.status === 401) {
+    if (hostRefusing) {
+      fail(
+        "API host / call webhook",
+        `POST /call/incoming returned ${hook.status}, but /health did too — the HOST is refusing every request (Vercel deployment protection, a WAF, or an egress proxy), not our signature check. Twilio will get the same refusal. Verify the deployment is public.`,
+      );
+    } else {
+      pass(
+        "API host / call webhook",
+        `POST /call/incoming returned ${hook.status} while /health is reachable — signature validation is ON and rejecting unsigned requests (correct).`,
+      );
+    }
   } else if (hook.status === 200) {
     const streamsToWs = hook.body?.includes(`wss://${env.wsDomain}/call/stream`);
     if (streamsToWs) {
@@ -408,14 +534,88 @@ function checkConversational(): void {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
+const USAGE = `Usage: tsx scripts/check-line.ts <+E164> [options]
+
+  --stage <prod|test>     SSM namespace to hydrate from (default: prod)
+  --region <aws-region>   default: $AWS_REGION or us-east-1
+  --api-domain <host>     override API_DOMAIN (no scheme)
+  --ws-domain <host>      override WS_DOMAIN (no scheme)
+  --no-ssm                don't hydrate from SSM; use ambient env/.env only
+
+Example:
+  npm run check:line -- +13143948500 --api-domain talk.cotrackpro.com`;
+
 async function main(): Promise<void> {
-  const phone = process.argv[2];
+  const argv = process.argv.slice(2);
+  let phone = "";
+  let stage = "prod";
+  let region = process.env.AWS_REGION || "us-east-1";
+  let useSsm = true;
+  let apiDomainOverride = "";
+  let wsDomainOverride = "";
+
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    switch (a) {
+      case "--stage": stage = argv[++i] ?? ""; break;
+      case "--region": region = argv[++i] ?? ""; break;
+      case "--api-domain": apiDomainOverride = argv[++i] ?? ""; break;
+      case "--ws-domain": wsDomainOverride = argv[++i] ?? ""; break;
+      case "--no-ssm": useSsm = false; break;
+      case "-h": case "--help": console.log(USAGE); process.exit(0); break;
+      default:
+        if (a.startsWith("-")) {
+          console.error(`Unknown option '${a}'\n\n${USAGE}`);
+          process.exit(2);
+        }
+        phone = a;
+    }
+  }
+
   if (!phone) {
-    console.error("Usage: tsx scripts/check-line.ts <+E164>   (e.g. +13143948500)");
+    console.error(USAGE);
+    process.exit(2);
+  }
+  if (stage !== "prod" && stage !== "test") {
+    console.error(`--stage must be 'prod' or 'test' (got '${stage}')`);
     process.exit(2);
   }
 
-  console.log(`Preflight for ${phone}`);
+  // CLI overrides beat everything, including SSM (hydration never
+  // overwrites an already-set var).
+  if (apiDomainOverride) process.env.API_DOMAIN = apiDomainOverride;
+  if (wsDomainOverride) process.env.WS_DOMAIN = wsDomainOverride;
+
+  if (useSsm) {
+    const filled = hydrateFromSsm(stage, region);
+    if (filled.length) {
+      console.log(
+        `Hydrated ${filled.length} value(s) from SSM /cotrackpro/${stage}: ${filled.join(", ")}`,
+      );
+    } else {
+      console.log(
+        `No values hydrated from SSM (aws CLI missing, no credentials, or nothing unset).`,
+      );
+    }
+  }
+
+  // env.ts requires an API domain and has no sensible default off-Vercel.
+  // Fail here with the fix rather than letting its import throw a stack
+  // trace at the user.
+  if (!process.env.API_DOMAIN && !process.env.SERVER_DOMAIN) {
+    console.error(
+      `\nNo API domain resolved.\n` +
+        `  Pass one:        npm run check:line -- ${phone} --api-domain cotrackpro-talk.vercel.app\n` +
+        `  Or store it:     aws ssm put-parameter --name /cotrackpro/${stage}/talk/server_domain \\\n` +
+        `                     --type String --value <your-vercel-host>\n` +
+        `  (On Vercel itself this auto-detects; it's only unset when running locally.)`,
+    );
+    process.exit(2);
+  }
+
+  await loadApp();
+
+  console.log(`\nPreflight for ${phone}`);
   console.log(`  API host: https://${env.apiDomain}`);
   console.log(`  WS host:  wss://${env.wsDomain}`);
 
