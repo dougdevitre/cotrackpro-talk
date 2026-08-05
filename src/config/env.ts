@@ -254,11 +254,16 @@ export const env = {
   // ── KV store (cross-instance shared state: rate limits, etc.) ────────
   // Backend: "auto" (default — uses upstash if KV_URL/KV_TOKEN set, else
   // memory), "memory", "upstash", or "dynamo".
-  kvBackend: optional("KV_BACKEND", "auto") as
-    | "auto"
-    | "memory"
-    | "upstash"
-    | "dynamo",
+  //
+  // Deliberately NOT narrowed with a cast here. This used to read
+  // `optional(...) as "auto" | "memory" | ...`, which told the type
+  // system a lie: a typo like KV_BACKEND=dynmao satisfied the type,
+  // matched no branch in resolveBackend, and silently produced a
+  // non-durable memory store — while also defeating KV_URL/KV_TOKEN,
+  // since the auto-upstash path requires the literal "auto". Validation
+  // belongs where the value is USED, so services/kv.ts checks it against
+  // KV_BACKENDS and warns on an unrecognized value.
+  kvBackend: optional("KV_BACKEND", "auto"),
   // Upstash Redis REST URL + Bearer token. Vercel KV is API-compatible;
   // set these to Vercel KV's values to use that instead.
   kvUrl: process.env.KV_URL || "",

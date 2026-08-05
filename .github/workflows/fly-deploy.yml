@@ -106,6 +106,44 @@ jobs:
             printf '%s=%s\0' "$name" "$value" >> "$RUNNER_TEMP/secrets.bin"
             count=$((count + 1))
           done
+          # Best-effort tier — mirrored IF present, skipped otherwise.
+          #
+          # KV_URL/KV_TOKEN matter here even though the WS host's hot path
+          # (call sessions) is deliberately in-process: this tier also
+          # serves /records, /api/ai/*, /api/ai/tts and
+          # /call/outbound-interactive, all of which rate-limit through
+          # the KV store. Without them the Fly tier keeps its own
+          # per-process counters while Vercel uses the shared backend, so
+          # the two tiers enforce different budgets against the same
+          # limits — and any idempotency key written by one is invisible
+          # to the other.
+          #
+          # TALK_OUTBOUND_API_KEY is the shared hub<->talk bearer; the
+          # Fastify tier verifies it on /api/sms/send and /call/outbound
+          # exactly as the Vercel tier does, and without it those routes
+          # 503 in production (authorizeHubBearer fails closed).
+          optional=(
+            "kv/url:KV_URL"
+            "kv/token:KV_TOKEN"
+            "talk/outbound_api_key:TALK_OUTBOUND_API_KEY"
+          )
+          for pair in "${optional[@]}"; do
+            suffix="${pair%%:*}"
+            name="${pair##*:}"
+            # `|| true` so a missing optional param doesn't fail the step.
+            value=$(aws ssm get-parameter \
+              --name "$SSM_PREFIX/$suffix" \
+              --with-decryption \
+              --query 'Parameter.Value' --output text 2>/dev/null) || true
+            if [ -z "$value" ] || [ "$value" = "None" ]; then
+              echo "  skip $name (optional; $SSM_PREFIX/$suffix not set)"
+              continue
+            fi
+            echo "::add-mask::$value"
+            printf '%s=%s\0' "$name" "$value" >> "$RUNNER_TEMP/secrets.bin"
+            count=$((count + 1))
+          done
+
           # Static settings:
           printf '%s=%s\0' "SERVER_DOMAIN" "$FLY_APP_NAME.fly.dev" >> "$RUNNER_TEMP/secrets.bin"
           printf '%s=%s\0' "VALIDATE_TWILIO_SIGNATURE" "true" >> "$RUNNER_TEMP/secrets.bin"

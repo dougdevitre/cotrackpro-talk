@@ -70,6 +70,15 @@ one request is invisible to the next**, `dedupeKey` won't dedupe a retry,
 and an SMS conversation forgets the previous message. Pick ONE durable
 backend.
 
+**Production runs Option B (Upstash).** Option A is kept for AWS-native
+single-host deployments. The deciding factor is that the Vercel tier has
+**no AWS credentials at runtime** — nothing in the sync pipeline mirrors
+them and there's no ambient IAM role — so Option A there means
+hand-setting long-lived access keys in the Vercel dashboard, against
+`adr-009-secret-rotation.md`. Option A's `pipeline` is also non-atomic,
+which breaks an invariant `src/core/rateLimit.ts` documents. See
+`docs/adr/adr-004-kv-abstraction.md`.
+
 **Option A — DynamoDB (AWS-native, no third-party vendor):**
 
 ```bash
@@ -91,16 +100,39 @@ vercel env add KV_DYNAMO_TABLE production   # value: cotrackpro-kv
 vercel env add AWS_REGION     production   # value: us-east-1
 ```
 
-**Option B — Upstash / Vercel KV:**
+**Option B — Upstash / Vercel KV (the production path):**
+
+Create the database at upstash.com. Use a **standalone** Upstash
+database, not the Vercel Marketplace integration — that injects
+`KV_REST_API_URL` / `KV_REST_API_TOKEN`, and `src/config/env.ts` reads
+`KV_URL` / `KV_TOKEN`.
+
+Put the credentials in SSM rather than the Vercel dashboard, so both
+sync scripts and both tiers pick them up:
 
 ```bash
-vercel env add KV_URL   production   # https://<db>.upstash.io
-vercel env add KV_TOKEN production   # Upstash REST token
-# KV_BACKEND defaults to "auto" → uses upstash when URL+TOKEN are set.
+KV_URL=https://<db>.upstash.io KV_TOKEN=<rest-token> \
+  ./scripts/ssm-params.sh create --from-env
+
+bash scripts/push-env-login.sh prod    # or ./scripts/sync-ssm-to-vercel.sh prod
+gh workflow run fly-deploy.yml         # the WS tier rate-limits too
 ```
+
+`KV_BACKEND` stays `auto` → upstash is selected when URL+TOKEN are set.
 
 Do **not** go live on the memory backend. STOP compliance and the
 no-double-send guarantee both depend on a durable shared backend.
+
+**Verify it's actually live**, rather than assuming from config —
+`check:line` reports the resolved backend and round-trips a canary key:
+
+```bash
+npm run check:line -- +<E164>
+```
+
+Expect `Durable state / KV backend` = upstash and a passing
+`KV round-trip`. A failure there means writes are being silently dropped;
+because every KV caller fails open, nothing else will tell you.
 
 ## Step 3 — App config (non-secret env)
 

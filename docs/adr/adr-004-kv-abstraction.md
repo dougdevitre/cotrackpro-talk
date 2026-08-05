@@ -1,6 +1,8 @@
 # ADR-004: KV abstraction with in-memory default + Upstash REST
 
-**Status:** Accepted — shipped in PR #5; pipeline method added in PR #6.
+**Status:** Accepted — shipped in PR #5; pipeline method added in PR #6;
+`DynamoKv` and the production backend choice recorded retroactively (see
+"Third backend" and "Which backend production runs" below).
 
 ## Context
 
@@ -40,6 +42,77 @@ client — just the specific operations the rate limiter and
 idempotency cache need. When a new caller needs something else
 (e.g. `zadd`, `hget`), we extend the interface on demand. YAGNI
 until it isn't.
+
+## Third backend: `DynamoKv` (recorded retroactively)
+
+A third backend was added to `src/services/kv.ts` without an ADR entry,
+and `docs/GO_LIVE-sms-voice-reminders.md` offers it as a co-equal option.
+Recording it here so the tradeoff is written down rather than rediscovered:
+
+3. **`DynamoKv`** — DynamoDB via the AWS SDK, partition key `pk`, native
+   TTL on `expireAt` plus a defensive expiry filter on read (DynamoDB's
+   sweep lags up to ~48h). Opt-in ONLY via `KV_BACKEND=dynamo`; `auto`
+   never selects it, because it needs credentials and a provisioned table
+   that memory/upstash deployments don't have.
+
+Two properties of it are load-bearing and easy to miss:
+
+- **`DynamoKv.pipeline` is NOT atomic.** DynamoDB has no values-returning
+  batch, so it loops over N round-trips. `src/core/rateLimit.ts` states
+  "the two counters either both move or neither does" — that claim holds
+  for `MemoryKv` and `UpstashKv` and is **false** under `dynamo`. A
+  throttle on the second op leaves the minute counter bumped and the hour
+  counter untouched.
+- **An expired-but-unswept counter row keeps its old `expireAt` and its
+  old value**, so `get` returns null while `incrBy` continues an inflated
+  stale count. Safe today only because every `incrBy` key is
+  time-bucketed (`rl:<ns>:<client>:<m|h|d>:<bucket>`). A future
+  non-bucketed counter would break this invariant.
+
+## Which backend production runs: Upstash
+
+The talk edge runs **Upstash**. The deciding factor is not performance —
+it's that **the Vercel tier has no AWS credentials at runtime**. Nothing
+in `scripts/sync-ssm-to-vercel.sh`, `scripts/push-env-login.sh`, or
+`.github/workflows/vercel-env-sync.yml` mirrors `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY`, and Vercel serverless has no ambient IAM role,
+so the SDK credential chain resolves nothing. Choosing `dynamo` would
+mean hand-setting long-lived access keys in the Vercel dashboard, which
+`adr-009-secret-rotation.md` advises against ("use IAM roles") and which
+`sync-ssm-to-vercel.sh` warns against as a class ("Never set these in the
+Vercel dashboard by hand").
+
+Upstash needs no AWS credentials, has a genuinely atomic `/pipeline`, and
+its credentials ride the existing SSM → Vercel pipeline as
+`kv/url` → `KV_URL` and `kv/token` → `KV_TOKEN`.
+
+`DynamoKv` stays in the tree as a supported option for an AWS-native
+single-host deployment (where an instance/task role supplies credentials
+and the non-atomic pipeline is the only real cost). It is not the
+hybrid-deployment default.
+
+## Misconfiguration must be loud
+
+Every consumer of this store fails **open** — a KV throw is logged and
+the caller proceeds. That is the right availability tradeoff, but it
+means a store that isn't working produces no failed request, no alert,
+and no user-visible error: just silently absent state. In the STOP
+suppression case that is a compliance violation rather than a bug.
+
+Two failure paths used to be entirely silent, and are now not:
+
+- `KV_BACKEND=upstash` with a missing `KV_TOKEN` fell back to memory.
+- A typo'd `KV_BACKEND` matched no branch, fell back to memory, **and**
+  defeated `KV_URL`/`KV_TOKEN` — because the auto-upstash path requires
+  the literal `"auto"`.
+
+`planKvBackend()` now returns a structured `reason` distinguishing
+"memory because that's the default" from "memory because your config is
+broken", and warns naming the offending value. `describeKvBackend()`
+reports what was configured; `probeKv()` round-trips a canary key to
+report whether it actually **functions** — the gap between those two is
+where `DynamoKv` fails, since it builds a client without resolving
+credentials and looks healthy until the first real write.
 
 ## Consequences
 
@@ -103,6 +176,16 @@ pipeline ships both ops as one atomic unit:
 ## See also
 
 - `src/services/kv.ts` — implementation.
-- `src/core/rateLimit.ts` — primary caller.
-- `src/core/idempotency.ts` — second caller.
-- `tests/kv.test.ts` — 30+ cases covering both backends.
+- `src/core/rateLimit.ts` — rate-limit counters.
+- `src/core/idempotency.ts` — replay cache.
+- `src/core/consent.ts` — STOP suppression list (the compliance-critical
+  caller; an opt-out that doesn't persist is a TCPA/A2P problem).
+- `src/core/voiceOutbound.ts` — pending `<Play>` line, handed off between
+  the call-placing request and Twilio's later audio fetch. Structurally
+  broken on a per-process backend.
+- `src/core/smsConversation.ts` — conversational-SMS thread memory.
+- `src/core/webConsent.ts` — proof-of-consent records for the opt-in form.
+- `tests/kv.test.ts` — ~30 cases, `MemoryKv` only (the file says so).
+- `tests/dynamoKv.test.ts` — `DynamoKv` class logic against a hand-written
+  fake. Note the real AWS adapter (`realDynamoKvClient`) has no coverage.
+- `tests/kvBackendSelection.test.ts` — the selection matrix and `probeKv`.
