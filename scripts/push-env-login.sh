@@ -29,7 +29,17 @@ aws sts get-caller-identity >/dev/null 2>&1 || { echo "ERR: no AWS credentials. 
 echo "vercel: $(vercel whoami 2>/dev/null)   aws acct: $(aws sts get-caller-identity --query Account --output text 2>/dev/null)"
 echo "Syncing SSM $PREFIX  ->  Vercel env '$TARGET'"
 
-# SSM suffix  ->  Vercel env var name (must match src/config/env.ts)
+# SSM suffix  ->  Vercel env var name (must match src/config/env.ts).
+#
+# Keep this list in lockstep with scripts/sync-ssm-to-vercel.sh — the two
+# scripts do the same job by different auth routes, and a var present in one
+# but not the other means the Vercel env depends on which one you happened
+# to run.
+#
+# A suffix may list ALTERNATES separated by "|"; the first that resolves
+# wins. Used for the Anthropic key, which lives at ai/anthropic/api_key
+# (what fly-deploy.yml reads) on some accounts and anthropic/api_key on
+# others. Run ./scripts/ssm-params.sh to see which one yours has.
 MAP=(
   "talk/outbound_api_key:TALK_OUTBOUND_API_KEY"
   "twilio/account_sid:TWILIO_ACCOUNT_SID"
@@ -38,19 +48,58 @@ MAP=(
   "twilio/phone_number:TWILIO_PHONE_NUMBER"
   "elevenlabs/api_key:ELEVENLABS_API_KEY"
   "elevenlabs/voice_id_doug:ELEVENLABS_VOICE_ID_DOUG"
-  "anthropic/api_key:ANTHROPIC_API_KEY"
+  "ai/anthropic/api_key|anthropic/api_key:ANTHROPIC_API_KEY"
 )
+
+# Best-effort tier: mirrored if present, skipped without marking the run
+# failed. WS_DOMAIN and INBOUND_PHONE_VOICE_MAP are consumed by
+# api/call/incoming.ts, which runs on Vercel — without them the call
+# streams to a host that can't serve it, and the per-number voice override
+# never applies. KV_URL/KV_TOKEN back SMS thread memory.
+OPTIONAL_MAP=(
+  "talk/ws_domain:WS_DOMAIN"
+  "voice/inbound_phone_map:INBOUND_PHONE_VOICE_MAP"
+  "kv/url:KV_URL"
+  "kv/token:KV_TOKEN"
+)
+
+# Resolve the first existing path among "|"-separated alternates; echo the
+# value, or nothing if none resolve.
+ssm_first() {
+  local suffixes="$1" cand val
+  local IFS='|'
+  for cand in $suffixes; do
+    val="$(aws ssm get-parameter --region "$REGION" --name "$PREFIX/$cand" --with-decryption --query Parameter.Value --output text 2>/dev/null)"
+    if [ -n "$val" ] && [ "$val" != "None" ]; then printf '%s' "$val"; return 0; fi
+  done
+  return 1
+}
+
+push_var() {  # push_var <env-name> <value>
+  vercel env rm "$1" "$TARGET" --yes >/dev/null 2>&1 || true
+  printf '%s' "$2" | vercel env add "$1" "$TARGET" >/dev/null 2>&1
+}
 
 fail=0
 for entry in "${MAP[@]}"; do
   suffix="${entry%%:*}"; name="${entry##*:}"
-  val="$(aws ssm get-parameter --region "$REGION" --name "$PREFIX/$suffix" --with-decryption --query Parameter.Value --output text 2>/dev/null)"
-  if [ -z "$val" ] || [ "$val" = "None" ]; then
-    echo "  WARN $name: $PREFIX/$suffix not in SSM - skipped"; fail=1; continue
+  if ! val="$(ssm_first "$suffix")"; then
+    echo "  WARN $name: $PREFIX/${suffix%%|*} not in SSM - skipped"; fail=1; continue
   fi
-  vercel env rm "$name" "$TARGET" --yes >/dev/null 2>&1 || true
-  if printf '%s' "$val" | vercel env add "$name" "$TARGET" >/dev/null 2>&1; then
+  if push_var "$name" "$val"; then
     echo "  set $name ok"
+  else
+    echo "  ERR  failed to set $name"; fail=1
+  fi
+done
+
+for entry in "${OPTIONAL_MAP[@]}"; do
+  suffix="${entry%%:*}"; name="${entry##*:}"
+  if ! val="$(ssm_first "$suffix")"; then
+    echo "  skip $name (optional; $PREFIX/${suffix%%|*} not set)"; continue
+  fi
+  if push_var "$name" "$val"; then
+    echo "  set $name ok (optional)"
   else
     echo "  ERR  failed to set $name"; fail=1
   fi
