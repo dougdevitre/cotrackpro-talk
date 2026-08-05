@@ -88,8 +88,8 @@ REGISTRY=(
   "talk/ws_domain:WS_DOMAIN:String:vercel:required:Host serving the media stream. Unset means Vercel's TwiML streams to Vercel, which cannot serve it — the call connects and goes silent"
   "voice/inbound_phone_map:INBOUND_PHONE_VOICE_MAP:String:fly+vercel:voice:Pins the ElevenLabs voice + role per number. Unset means every call answers in the stock default voice"
   "elevenlabs/voice_id_doug:ELEVENLABS_VOICE_ID_DOUG:String:vercel:voice:Doug's cloned voice for outbound reminder calls"
-  "kv/url:KV_URL:String:fly+vercel:memory:Shared KV. Unset means SMS threads reset between messages on Vercel"
-  "kv/token:KV_TOKEN:SecureString:fly+vercel:memory:Shared KV auth"
+  "kv/url:KV_URL:String:fly+vercel:memory:Shared KV (Upstash option). NOT needed if you run the DynamoDB backend — see the note below"
+  "kv/token:KV_TOKEN:SecureString:fly+vercel:memory:Shared KV auth (Upstash option)"
   "talk/server_domain:SERVER_DOMAIN:String:vercel:optional:Single-host fallback domain"
 )
 
@@ -184,6 +184,25 @@ done
 
 echo
 echo "${#MISSING_SUFFIX[@]} missing (${missing_required} required, ${missing_other} other)"
+
+# kv/* is only ONE of two ways to get a durable KV backend, and the other
+# one doesn't touch SSM at all — so "MISSING" here is not proof that the
+# app is running on the in-memory backend. Say so, rather than sending an
+# operator off to provision Upstash they may not need.
+kv_missing=0
+for s in "${MISSING_SUFFIX[@]:-}"; do
+  [[ "$s" == kv/* ]] && kv_missing=1
+done
+if [[ "$kv_missing" -eq 1 ]]; then
+  echo
+  echo "  NOTE: kv/* covers the Upstash option only. The DynamoDB backend"
+  echo "        (KV_BACKEND=dynamo + KV_DYNAMO_TABLE, set directly in the"
+  echo "        Vercel env) needs no SSM parameters, so these can be"
+  echo "        legitimately absent. A durable backend is MANDATORY either"
+  echo "        way — STOP suppression and send idempotency both depend on"
+  echo "        it. To see which backend is actually live:"
+  echo "          npm run check:line -- <your +E164 number>"
+fi
 
 # Known drift between the two deploy paths: fly-deploy.yml reads the
 # Anthropic key from ai/anthropic/api_key, sync-ssm-to-vercel.sh reads it
