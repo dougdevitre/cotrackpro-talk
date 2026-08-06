@@ -43,6 +43,45 @@ const KNOWN_MESSAGE_TYPES = [
  */
 const SILENT_SESSION_AUDIO_SECS = 10;
 
+const REALTIME_STT_ENDPOINT =
+  "wss://api.elevenlabs.io/v1/speech-to-text/realtime";
+
+/**
+ * Build the realtime STT connection URL.
+ *
+ * The session is configured ENTIRELY by these query parameters. There is
+ * no post-connect configuration message — an earlier version sent a
+ * `session_config` frame and got back
+ * `{"message_type":"input_error","error":"Unexpected message type:
+ * session_config"}`, which left the session on its defaults while we
+ * streamed µ-law 8kHz into it. That produced no transcripts, no error
+ * the caller could see, and a perfectly normal-looking call.
+ *
+ * `ulaw_8000` is what Twilio's media stream already sends, so frames
+ * forward untranscoded. `commit_strategy=vad` makes ElevenLabs segment
+ * on silence rather than requiring us to send explicit commits.
+ *
+ * Split out from connect() so the parameter set is assertable without a
+ * live socket.
+ *
+ * Reference:
+ * https://elevenlabs.io/docs/api-reference/speech-to-text/v-1-speech-to-text-realtime
+ */
+export function buildRealtimeUrl(): string {
+  const params = new URLSearchParams({
+    model_id: "scribe_v2_realtime",
+    // Twilio media streams are µ-law 8kHz. Matching it here is what
+    // lets sendAudio() forward the payload verbatim.
+    audio_format: "ulaw_8000",
+    language_code: "en",
+    // "vad" = segment on detected silence. The alternative, "manual",
+    // would require us to set `commit: true` on an audio chunk.
+    commit_strategy: "vad",
+    vad_silence_threshold_secs: "1.0",
+  });
+  return `${REALTIME_STT_ENDPOINT}?${params.toString()}`;
+}
+
 export class STTStream {
   private ws: WebSocket | null = null;
   private readonly callSid: string;
@@ -80,7 +119,7 @@ export class STTStream {
   }
 
   async connect(): Promise<void> {
-    const url = "wss://api.elevenlabs.io/v1/speech-to-text/realtime";
+    const url = buildRealtimeUrl();
 
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(url, {
@@ -91,20 +130,13 @@ export class STTStream {
 
       this.ws.on("open", () => {
         this.reconnectAttempts = 0;
-        this.log.info("STT WS open — configuring session");
-        // Configure the STT session for mulaw 8kHz (Twilio format)
-        this.ws!.send(
-          JSON.stringify({
-            message_type: "session_config",
-            audio_format: "ulaw_8000",
-            sample_rate: 8000,
-            language_code: "en",
-            model_id: "scribe_v2_realtime",
-            // VAD-based auto-commit: detects when the user stops speaking
-            vad_commit_strategy: true,
-            vad_silence_threshold_secs: 1.0,
-          }),
-        );
+        // Nothing to send here. The session is already configured by the
+        // query string — see buildRealtimeUrl(). This handler used to
+        // post a `session_config` message, which the API answered with
+        // `{"message_type":"input_error","error":"Unexpected message
+        // type: session_config"}`, leaving the session on its defaults
+        // while we streamed µ-law into it.
+        this.log.info("STT WS open");
         resolve();
       });
 
@@ -233,11 +265,15 @@ export class STTStream {
     // Each Twilio media frame is 20ms at 8kHz mulaw
     this.secondsForwarded += 0.02;
 
+    // No sample_rate here: the format is fixed at connect time by
+    // `audio_format` in the query string, and an unexpected field is
+    // exactly what earned an `input_error` from the session_config
+    // frame. `commit` is omitted deliberately — commit_strategy=vad
+    // means ElevenLabs segments on silence for us.
     this.ws.send(
       JSON.stringify({
         message_type: "input_audio_chunk",
         audio_base_64: base64Audio,
-        sample_rate: 8000,
       }),
     );
   }

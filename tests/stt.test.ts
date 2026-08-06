@@ -16,7 +16,7 @@
 import "./helpers/setupEnv.js";
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { STTStream } from "../src/services/stt.js";
+import { STTStream, buildRealtimeUrl } from "../src/services/stt.js";
 
 type Captured = {
   partials: string[];
@@ -36,6 +36,55 @@ function makeStream(): { stt: STTStream; got: Captured } {
 }
 
 const frame = (o: Record<string, unknown>) => JSON.stringify(o);
+
+// The session is configured by the connection URL alone. Sending a
+// `session_config` message instead got back
+// {"message_type":"input_error","error":"Unexpected message type:
+// session_config"} — the session kept its defaults while we streamed
+// µ-law into it, and transcribed nothing.
+describe("buildRealtimeUrl", () => {
+  const params = () => new URL(buildRealtimeUrl()).searchParams;
+
+  it("points at the realtime STT endpoint over wss", () => {
+    const u = new URL(buildRealtimeUrl());
+    assert.equal(u.protocol, "wss:");
+    assert.equal(u.host, "api.elevenlabs.io");
+    assert.equal(u.pathname, "/v1/speech-to-text/realtime");
+  });
+
+  // Twilio media streams are µ-law 8kHz; anything else here means we'd
+  // be feeding the session a format it isn't expecting.
+  it("declares ulaw_8000 so Twilio frames need no transcoding", () => {
+    assert.equal(params().get("audio_format"), "ulaw_8000");
+  });
+
+  // "vad" segments on silence. Under "manual" nothing would ever commit
+  // unless sendAudio set commit:true — which it deliberately doesn't.
+  it("asks for VAD segmentation with a silence threshold", () => {
+    assert.equal(params().get("commit_strategy"), "vad");
+    assert.equal(params().get("vad_silence_threshold_secs"), "1.0");
+  });
+
+  it("names the model and language", () => {
+    assert.equal(params().get("model_id"), "scribe_v2_realtime");
+    assert.equal(params().get("language_code"), "en");
+  });
+
+  // `vad_commit_strategy` was invented — it is not a parameter the API
+  // accepts, and it silently did nothing.
+  it("carries no invented parameters", () => {
+    assert.equal(params().get("vad_commit_strategy"), null);
+    assert.equal(params().get("sample_rate"), null);
+  });
+
+  // The API key travels in the xi-api-key header, not the query string,
+  // so it can't leak into a logged URL.
+  it("puts no credential in the URL", () => {
+    const url = buildRealtimeUrl();
+    assert.equal(new URL(url).searchParams.get("token"), null);
+    assert.ok(!/api[_-]?key/i.test(url));
+  });
+});
 
 describe("STTStream.handleMessage — known frame types", () => {
   let stt: STTStream;
