@@ -27,6 +27,22 @@ export interface STTStreamOptions {
 const MAX_RECONNECT_ATTEMPTS = 3;
 const RECONNECT_DELAY_MS = 1000;
 
+/** Frame types this client understands. Named so the "unrecognized type"
+ *  warning can show an operator what we were expecting instead. */
+const KNOWN_MESSAGE_TYPES = [
+  "session_started",
+  "partial_transcript",
+  "committed_transcript",
+  "error",
+] as const;
+
+/**
+ * Below this much forwarded audio, a session with no transcripts is
+ * unremarkable — a caller who said nothing, or a call that ended during
+ * the greeting. Above it, silence is a finding.
+ */
+const SILENT_SESSION_AUDIO_SECS = 10;
+
 export class STTStream {
   private ws: WebSocket | null = null;
   private readonly callSid: string;
@@ -39,6 +55,20 @@ export class STTStream {
   private isClosed = false;
   private reconnectAttempts = 0;
   private log;
+  /**
+   * Diagnostics for the "audio in, nothing out" failure. A call that
+   * transcribes nothing used to look exactly like a call where nobody
+   * spoke: no error, no log, just silence. These three fields make the
+   * difference visible at close.
+   */
+  private committedCount = 0;
+  private partialCount = 0;
+  /** Message types we've already warned about, so one unknown frame type
+   *  per session doesn't flood a 50-second call. */
+  private readonly unknownTypesSeen = new Set<string>();
+  /** Guards warnIfSilent so close() and the socket's own close event
+   *  don't both report the same silent session. */
+  private silentWarned = false;
 
   constructor(opts: STTStreamOptions) {
     this.callSid = opts.callSid;
@@ -79,35 +109,7 @@ export class STTStream {
       });
 
       this.ws.on("message", (data: WebSocket.Data) => {
-        try {
-          const msg = JSON.parse(data.toString());
-
-          switch (msg.message_type) {
-            case "session_started":
-              this.log.info({ sessionId: msg.session_id }, "STT session started");
-              break;
-
-            case "partial_transcript":
-              if (msg.text) {
-                this.onPartial(msg.text);
-              }
-              break;
-
-            case "committed_transcript":
-              if (msg.text) {
-                this.log.debug({ text: msg.text }, "STT final transcript");
-                this.onFinal(msg.text);
-              }
-              break;
-
-            case "error":
-              this.log.error({ msg }, "STT error message");
-              this.onError(new Error(msg.error || "STT error"));
-              break;
-          }
-        } catch (err) {
-          this.log.warn({ err }, "Failed to parse STT message");
-        }
+        this.handleMessage(data.toString());
       });
 
       this.ws.on("error", (err) => {
@@ -118,6 +120,7 @@ export class STTStream {
 
       this.ws.on("close", (code) => {
         this.log.info({ code }, "STT WS closed");
+        this.warnIfSilent();
         // Auto-reconnect on unexpected close (not a deliberate close())
         if (!this.isClosed && this.reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
           this.reconnectAttempts++;
@@ -131,6 +134,92 @@ export class STTStream {
         }
       });
     });
+  }
+
+  /**
+   * Dispatch one inbound frame from the STT socket.
+   *
+   * Split out of the `on("message")` handler so it can be driven directly
+   * by tests — `new WebSocket()` is constructed inline in connect(), so
+   * there's no socket seam, and this is where all the interesting logic
+   * lives anyway. Never throws: a malformed frame is logged and dropped,
+   * because killing a live call over one bad frame is worse than
+   * ignoring it.
+   */
+  handleMessage(raw: string): void {
+    try {
+      const msg = JSON.parse(raw);
+
+      switch (msg.message_type) {
+        case "session_started":
+          this.log.info({ sessionId: msg.session_id }, "STT session started");
+          break;
+
+        case "partial_transcript":
+          if (msg.text) {
+            this.partialCount++;
+            // Partials arriving while commits don't is the single
+            // clearest signal that transcription works and the commit
+            // strategy is what's broken. Worth its own line.
+            this.log.debug(
+              { text: msg.text, n: this.partialCount },
+              "STT partial transcript",
+            );
+            this.onPartial(msg.text);
+          }
+          break;
+
+        case "committed_transcript":
+          if (msg.text) {
+            this.committedCount++;
+            this.log.debug({ text: msg.text }, "STT final transcript");
+            this.onFinal(msg.text);
+          }
+          break;
+
+        case "error":
+          this.log.error({ msg }, "STT error message");
+          this.onError(new Error(msg.error || "STT error"));
+          break;
+
+        // An unrecognized type used to fall through to nothing — no log,
+        // no error, no counter. If the realtime protocol renames a field
+        // or adds a frame we don't know, that looked identical to
+        // receiving nothing at all. Say what arrived.
+        default: {
+          const type = String(msg.message_type ?? "(absent)");
+          if (!this.unknownTypesSeen.has(type)) {
+            this.unknownTypesSeen.add(type);
+            this.log.warn(
+              { messageType: type, known: KNOWN_MESSAGE_TYPES },
+              "Unrecognized STT message type — ignoring (logged once per type)",
+            );
+          }
+          this.log.debug({ raw }, "STT raw frame");
+          break;
+        }
+      }
+    } catch (err) {
+      this.log.warn({ err }, "Failed to parse STT message");
+    }
+  }
+
+  /**
+   * What this session has seen. Exposed so the silent-session behavior
+   * is assertable without scraping log output.
+   */
+  get diagnostics(): {
+    committed: number;
+    partials: number;
+    unknownTypes: string[];
+    audioSecs: number;
+  } {
+    return {
+      committed: this.committedCount,
+      partials: this.partialCount,
+      unknownTypes: [...this.unknownTypesSeen],
+      audioSecs: this.secondsForwarded,
+    };
   }
 
   /**
@@ -164,5 +253,39 @@ export class STTStream {
       this.secondsReported = true;
       this.onSeconds(this.secondsForwarded);
     }
+    this.warnIfSilent();
+  }
+
+  /**
+   * Say so when a session was fed real audio and produced no transcripts.
+   *
+   * This is the whole "audio in, nothing out" failure, and until now it
+   * was indistinguishable in the logs from a caller who never spoke:
+   * ElevenLabs bills the seconds either way, the socket closes cleanly
+   * either way, and nothing else fires. The partial count separates the
+   * two live causes — partials without commits means transcription works
+   * and the commit strategy doesn't; zero of both means the audio isn't
+   * being transcribed at all.
+   *
+   * Fires at most once, from whichever of close()/on("close") runs first.
+   */
+  private warnIfSilent(): void {
+    if (this.silentWarned) return;
+    if (this.committedCount > 0) return;
+    if (this.secondsForwarded < SILENT_SESSION_AUDIO_SECS) return;
+
+    this.silentWarned = true;
+    this.log.warn(
+      {
+        audioSecs: Math.round(this.secondsForwarded),
+        partials: this.partialCount,
+        unknownMessageTypes: [...this.unknownTypesSeen],
+        hint:
+          this.partialCount > 0
+            ? "partials arrived but nothing committed — suspect the VAD/commit config"
+            : "no partials either — suspect the audio format or session config",
+      },
+      "STT produced NO committed transcripts despite receiving audio",
+    );
   }
 }
