@@ -17,6 +17,7 @@
     "list:phones": "tsx scripts/list-phone-mappings.ts",
     "lint:config": "tsx scripts/lint-config.ts",
     "go-live": "bash scripts/go-live.sh",
+    "kv:setup": "bash scripts/kv-setup.sh",
     "preflight": "npm run typecheck && npm test && npm run lint:config"
   },
   "engines": {

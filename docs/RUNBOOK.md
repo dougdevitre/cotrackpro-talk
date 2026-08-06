@@ -46,7 +46,9 @@ Before diving into any section below:
 
 1. **Check `/health` on both tiers.** `https://$API_DOMAIN/health`
    (Vercel) and `https://$WS_DOMAIN/health` (WS host). Both should
-   return `status: "ok"`.
+   return `status: "ok"` and `kv.durable: true`. `status: "ok"` alone
+   is not enough — it means the instance answered, not that its state
+   survives the request.
 2. **Look for the last `cost.call.summary` log line.** If calls are
    completing, this is the authoritative "are we serving traffic?"
    signal.
@@ -277,6 +279,21 @@ the rollup itself failed — check for `cost.rollup.failed`.
 
 **Verification:**
 
+Ask the deployed tier directly — this is the fastest confirmation, and
+the only one that reflects what's actually running:
+
+```bash
+curl -s -H "Authorization: Bearer $TALK_OUTBOUND_API_KEY" \
+  "https://<edge-host>/health?deep=1" | jq .kv
+```
+
+`probe.ok: false` with an error is a live failure; the endpoint returns
+503 in that case. `durable: false` means it isn't a KV outage at all —
+the deploy is running on in-process memory, which is a config problem
+(see `docs/GO_LIVE-sms-voice-reminders.md` Step 2).
+
+Corresponding log lines:
+
 ```
 msg="Rate limiter error — failing open"
 msg="Idempotency lookup failed — failing open"
@@ -298,9 +315,12 @@ Neither is a call-dropping event. Monitor via the SLO in
 
 - **Upstash regional outage:** wait it out. Nothing to do.
 - **Token expired:** generate a new REST token in the Upstash
-  console, update `KV_TOKEN`, redeploy.
+  console, update `KV_TOKEN`, redeploy. Confirm with
+  `npm run kv:setup -- --verify-only` — a redeploy that didn't pick up
+  the new value looks identical to one that did, until you ask it.
 - **Network path:** check egress firewall rules from the WS host
   (Vercel's egress is managed).
+- **`durable: false`:** not an outage. Run `npm run kv:setup`.
 
 ## Symptom: "I need to rotate a secret"
 

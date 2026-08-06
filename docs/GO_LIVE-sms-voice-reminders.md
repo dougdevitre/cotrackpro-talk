@@ -107,8 +107,22 @@ database, not the Vercel Marketplace integration — that injects
 `KV_REST_API_URL` / `KV_REST_API_TOKEN`, and `src/config/env.ts` reads
 `KV_URL` / `KV_TOKEN`.
 
-Put the credentials in SSM rather than the Vercel dashboard, so both
-sync scripts and both tiers pick them up:
+Then run the whole chain — it prompts for the two REST credentials, puts
+them in SSM (never overwriting), fires both deploy workflows, and polls
+production until it confirms a durable backend:
+
+```bash
+npm run kv:setup
+```
+
+It **exits non-zero unless production reports durable KV**, so it's safe
+to gate a go-live on. `npm run kv:setup -- --verify-only` re-checks
+without touching config.
+
+`KV_BACKEND` stays `auto` → upstash is selected when URL+TOKEN are set.
+
+<details>
+<summary>The same steps by hand</summary>
 
 ```bash
 KV_URL=https://<db>.upstash.io KV_TOKEN=<rest-token> \
@@ -118,21 +132,31 @@ bash scripts/push-env-login.sh prod    # or ./scripts/sync-ssm-to-vercel.sh prod
 gh workflow run fly-deploy.yml         # the WS tier rate-limits too
 ```
 
-`KV_BACKEND` stays `auto` → upstash is selected when URL+TOKEN are set.
+Then **redeploy on Vercel** — env vars only apply to new deployments, and
+nothing fails if you skip it. That omission is the single most common way
+this step appears done and isn't.
+</details>
 
 Do **not** go live on the memory backend. STOP compliance and the
 no-double-send guarantee both depend on a durable shared backend.
 
-**Verify it's actually live**, rather than assuming from config —
-`check:line` reports the resolved backend and round-trips a canary key:
+**Verify it's actually live**, rather than assuming from config:
 
 ```bash
-npm run check:line -- +<E164>
+curl -sf -H "Authorization: Bearer $TALK_OUTBOUND_API_KEY" \
+  "https://<edge-host>/health?deep=1" | jq .kv
 ```
 
-Expect `Durable state / KV backend` = upstash and a passing
-`KV round-trip`. A failure there means writes are being silently dropped;
-because every KV caller fails open, nothing else will tell you.
+Expect `durable: true` and `probe.ok: true`. The endpoint returns **503**
+when the deployed tier isn't durable or the round-trip fails, so `curl -f`
+alone is a sufficient check. A failure means writes are being silently
+dropped; because every KV caller fails open, nothing else will tell you.
+
+> ⚠️ `npm run check:line` also reports a KV backend, but it describes **the
+> machine you run it on** — its env hydrated from SSM — not the deployed
+> function. Once SSM holds the credentials it goes green locally even if
+> Vercel is still serving a deployment from before the env sync. Use
+> `/health?deep=1` (or `kv:setup --verify-only`) for the deployed tier.
 
 ## Step 3 — App config (non-secret env)
 

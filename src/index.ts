@@ -22,6 +22,8 @@ import { registerAiRoutes } from "./handlers/ai.js";
 import { registerSmsRoutes } from "./handlers/sms.js";
 import { handleCallStream } from "./handlers/callHandler.js";
 import { resolveRequestId } from "./core/requestId.js";
+import { authorizeHubBearer } from "./core/auth.js";
+import { kvHealth, wantsDeep } from "./core/health.js";
 
 async function main() {
   const app = Fastify({
@@ -52,14 +54,29 @@ async function main() {
   registerSmsRoutes(app);
 
   // Health check — includes peak session count so operators can see
-  // how close we've been to the concurrent-session cap (audit E-2).
-  app.get("/health", async (_req, reply) => {
-    reply.send({
+  // how close we've been to the concurrent-session cap (audit E-2), and
+  // the KV backend so a deploy running on non-durable in-memory state is
+  // visible from outside. `?deep=1` adds a live KV round-trip and
+  // answers 503 if it fails; it needs the shared bearer because the
+  // probe writes. Same shape as the Vercel tier — see src/core/health.ts.
+  app.get("/health", async (request, reply) => {
+    const deep = wantsDeep(request.url);
+    if (deep) {
+      const err = authorizeHubBearer(request.headers.authorization, "health:deep");
+      if (err) {
+        reply.code(err.status).send({ error: err.error });
+        return;
+      }
+    }
+
+    const { kv, status } = await kvHealth(deep);
+    reply.code(status).send({
       status: "ok",
       activeCalls: sessionCount(),
       peakActiveCalls: peakSessionCount(),
       maxConcurrentSessions: env.maxConcurrentSessions,
       uptime: process.uptime(),
+      kv,
     });
   });
 

@@ -770,13 +770,20 @@ export function _resetKvForTests(): void {
 /**
  * Test-only: inject a custom KV implementation (e.g. a stub that
  * throws, to exercise fail-open behavior). Do not call in production.
+ *
+ * @param info  Override the stamped backend info. Defaults to a
+ *              non-durable memory record, which is what most callers
+ *              want. Pass a durable one to exercise code that branches
+ *              on `durable` — /health?deep=1 returns 503 without it, so
+ *              the success path is otherwise unreachable in tests
+ *              without a real Upstash or DynamoDB.
  */
-export function _setKvForTests(store: KvStore): void {
+export function _setKvForTests(store: KvStore, info?: KvBackendInfo): void {
   _kv = store;
   // Also stamp the info record. Without this, a test that injects a store
   // and then calls describeKvBackend() would dereference a null `_info` —
   // kv() short-circuits on the already-set `_kv` and never populates it.
-  _info = {
+  _info = info ?? {
     backend: "memory",
     reason: "configured",
     durable: false,

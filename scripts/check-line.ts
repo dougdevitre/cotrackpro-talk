@@ -531,6 +531,18 @@ async function checkConversational(): Promise<void> {
   // with a missing token (which silently falls back to memory) and it
   // missed a typo'd KV_BACKEND (same silent fallback), reporting a pass on
   // a deployment that was really running in-process.
+  //
+  // SCOPE: this describes the process running THIS SCRIPT — env hydrated
+  // from SSM, or your local .env — not the deployed function. Once SSM
+  // has kv/url + kv/token, the check below goes green here even if Vercel
+  // is still serving a deployment that predates the env sync, because
+  // Vercel only applies env vars to NEW deployments. Asking the deployed
+  // tier is a different question, and `npm run kv:setup -- --verify-only`
+  // (GET /health?deep=1) is what answers it.
+  const LOCAL_SCOPE =
+    "This reflects the environment this script is running in, not the deployed tier — " +
+    "run `npm run kv:setup -- --verify-only` to ask production.";
+
   const info = describeKvBackend();
   if (!info.durable) {
     const because =
@@ -540,12 +552,12 @@ async function checkConversational(): Promise<void> {
         : `KV backend is in-memory (${info.detail})`;
     fail(
       "Durable state / KV backend",
-      `${because}. On Vercel each request may hit a different instance, so STOP opt-outs don't persist, dedupeKey doesn't dedupe, outbound voice lines are lost between the call and Twilio's audio fetch, and SMS threads lose context. Set KV_URL/KV_TOKEN (Upstash) or KV_BACKEND=dynamo.`,
+      `${because}. On Vercel each request may hit a different instance, so STOP opt-outs don't persist, dedupeKey doesn't dedupe, outbound voice lines are lost between the call and Twilio's audio fetch, and SMS threads lose context. Run \`npm run kv:setup\` to provision Upstash end to end, or set KV_BACKEND=dynamo. ${LOCAL_SCOPE}`,
     );
     return;
   }
 
-  pass("Durable state / KV backend", `${info.backend} — ${info.detail}`);
+  pass("Durable state / KV backend", `${info.backend} — ${info.detail}. ${LOCAL_SCOPE}`);
 
   // Configured is not the same as working. DynamoKv in particular builds
   // its client without resolving credentials, so a missing IAM key or an
@@ -560,7 +572,7 @@ async function checkConversational(): Promise<void> {
   } else {
     fail(
       "Durable state / KV round-trip",
-      `${probe.backend} is configured but NOT working: ${probe.error}. Every KV caller fails open, so this produces no failed requests — just silently missing state.`,
+      `${probe.backend} is configured but NOT working: ${probe.error}. Every KV caller fails open, so this produces no failed requests — just silently missing state. ${LOCAL_SCOPE}`,
     );
   }
 }
