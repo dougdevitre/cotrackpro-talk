@@ -7,22 +7,37 @@
  * in-memory because it's on the audio hot path (see the comment in
  * sessions.ts explaining why).
  *
- * Two backends:
+ * Three backends:
  *
  *   1. memory (default) — single-instance only. A Map with per-key
- *      expiry timestamps. Zero setup, zero external calls.
+ *      expiry timestamps. Zero setup, zero external calls. NOT durable:
+ *      on Vercel serverless each instance keeps its own, so state written
+ *      by one request is invisible to the next.
  *
  *   2. upstash — Upstash Redis via REST. Works on both the Vercel tier
  *      (serverless) and the WS host without adding any npm dependency;
  *      we just use the global fetch(). Vercel KV is API-compatible with
  *      Upstash Redis REST, so this also works with Vercel KV
- *      (set KV_URL/KV_TOKEN to the Vercel KV values).
+ *      (set KV_URL/KV_TOKEN to the Vercel KV values). This is the
+ *      production backend — see docs/adr/adr-004-kv-abstraction.md.
+ *
+ *   3. dynamo — DynamoDB, opt-in via KV_BACKEND=dynamo. AWS-native, but
+ *      needs credentials the Vercel tier does not have, and its
+ *      `pipeline` is NOT atomic (N round-trips, no shared transaction) —
+ *      which breaks the invariant src/core/rateLimit.ts relies on. Read
+ *      the ADR before choosing it.
  *
  * Selected via KV_BACKEND env var. If KV_URL + KV_TOKEN are set,
- * upstash is used automatically; otherwise memory.
+ * upstash is used automatically; otherwise memory. `dynamo` is never
+ * auto-selected. An unrecognized value warns and falls back to memory.
+ *
+ * Because every consumer of this store fails OPEN — a throw is logged and
+ * the caller proceeds — a backend that isn't working produces no failed
+ * request. Use `describeKvBackend()` for what was configured and
+ * `probeKv()` for whether it actually functions.
  *
  * This abstraction is intentionally minimal — get / set with TTL /
- * incrBy / delete. Add methods only when a caller actually needs one.
+ * incrBy / delete / pipeline. Add methods only when a caller needs one.
  */
 
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
@@ -535,16 +550,92 @@ function realDynamoKvClient(table: string): DynamoKvClient {
 
 // ── Backend selection ───────────────────────────────────────────────────────
 
-function resolveBackend(): KvStore {
-  const requested = env.kvBackend;
-  const url = env.kvUrl;
-  const token = env.kvToken;
+/** The backend names `KV_BACKEND` accepts. */
+export const KV_BACKENDS = ["auto", "memory", "upstash", "dynamo"] as const;
+export type KvBackendName = (typeof KV_BACKENDS)[number];
+/** The backend actually in use — `auto` is resolved away. */
+export type EffectiveKvBackend = Exclude<KvBackendName, "auto">;
+
+/**
+ * Why a backend was chosen — surfaced by `describeKvBackend()` so an
+ * operator can tell "memory because that's the default" apart from
+ * "memory because your config is broken and I fell back". The second is
+ * an incident; the first is local development.
+ */
+export type KvBackendReason =
+  | "default"
+  | "configured"
+  | "auto-detected"
+  | "fallback-missing-credentials"
+  | "fallback-unknown-backend";
+
+export interface KvBackendInfo {
+  backend: EffectiveKvBackend;
+  reason: KvBackendReason;
+  /** True when the backend survives a process restart / serves all instances. */
+  durable: boolean;
+  /** Operator-facing one-liner. Never contains credentials. */
+  detail: string;
+}
+
+let _info: KvBackendInfo | null = null;
+
+/** The config `planKvBackend` needs. Mirrors the KV_* env vars. */
+export interface KvConfig {
+  backend: string;
+  url: string;
+  token: string;
+  dynamoTable: string;
+  dynamoRegion: string;
+}
+
+/**
+ * Decide which backend to use, WITHOUT constructing it.
+ *
+ * Split out from the store construction so the decision — which is all
+ * the interesting logic, and where two silent-fallback bugs lived — is a
+ * pure function of its input and can be tested directly. Testing it
+ * through the env would mean defeating the module cache on env.ts, which
+ * snapshots process.env at import.
+ *
+ * Emits the operator-facing log line as a side effect; the returned
+ * `reason` carries the same information structurally.
+ */
+export function planKvBackend(cfg: KvConfig): KvBackendInfo {
+  const { backend: requested, url, token } = cfg;
+
+  const memory = (reason: KvBackendReason, detail: string): KvBackendInfo => ({
+    backend: "memory",
+    reason,
+    durable: false,
+    detail,
+  });
+
+  // An unrecognized KV_BACKEND used to fall through to memory silently —
+  // and worse, it also defeated KV_URL/KV_TOKEN, because the auto-upstash
+  // path below requires requested === "auto". A typo therefore produced a
+  // non-durable store while the config looked deliberate. Say so loudly.
+  if (!(KV_BACKENDS as readonly string[]).includes(requested)) {
+    log.warn(
+      { requested, valid: KV_BACKENDS },
+      "Unrecognized KV_BACKEND — falling back to memory (NOT durable)",
+    );
+    return memory(
+      "fallback-unknown-backend",
+      `KV_BACKEND="${requested}" is not one of ${KV_BACKENDS.join(", ")}`,
+    );
+  }
 
   // Explicit opt-in only — `auto` never picks dynamo (it would require AWS
   // creds + a provisioned table that memory/upstash users don't have).
   if (requested === "dynamo") {
-    log.info({ table: env.kvDynamoTable }, "KV backend: dynamo");
-    return new DynamoKv(realDynamoKvClient(env.kvDynamoTable));
+    log.info({ table: cfg.dynamoTable }, "KV backend: dynamo");
+    return {
+      backend: "dynamo",
+      reason: "configured",
+      durable: true,
+      detail: `DynamoDB table ${cfg.dynamoTable} in ${cfg.dynamoRegion}`,
+    };
   }
 
   if (requested === "upstash" || (requested === "auto" && url && token)) {
@@ -552,35 +643,152 @@ function resolveBackend(): KvStore {
       log.warn(
         "KV_BACKEND=upstash but KV_URL/KV_TOKEN missing — falling back to memory",
       );
-      return new MemoryKv();
+      return memory(
+        "fallback-missing-credentials",
+        "KV_BACKEND=upstash but KV_URL and/or KV_TOKEN are unset",
+      );
     }
-    log.info({ url: url.replace(/\/\/.*@/, "//***@") }, "KV backend: upstash");
-    return new UpstashKv(url, token);
+    log.info({ url: redactUrl(url) }, "KV backend: upstash");
+    return {
+      backend: "upstash",
+      reason: requested === "upstash" ? "configured" : "auto-detected",
+      durable: true,
+      detail: redactUrl(url),
+    };
   }
 
   log.info("KV backend: memory");
-  return new MemoryKv();
+  return memory(
+    requested === "memory" ? "configured" : "default",
+    requested === "memory"
+      ? "KV_BACKEND=memory"
+      : "KV_BACKEND unset/auto with no KV_URL+KV_TOKEN",
+  );
+}
+
+/** Build the store the plan calls for. */
+function selectBackend(): { store: KvStore; info: KvBackendInfo } {
+  const info = planKvBackend({
+    backend: env.kvBackend,
+    url: env.kvUrl,
+    token: env.kvToken,
+    dynamoTable: env.kvDynamoTable,
+    dynamoRegion: env.dynamoRegion,
+  });
+
+  switch (info.backend) {
+    case "dynamo":
+      return { store: new DynamoKv(realDynamoKvClient(env.kvDynamoTable)), info };
+    case "upstash":
+      return { store: new UpstashKv(env.kvUrl, env.kvToken), info };
+    default:
+      return { store: new MemoryKv(), info };
+  }
+}
+
+/** Strip any embedded credentials from a URL before it reaches a log line. */
+function redactUrl(url: string): string {
+  return url.replace(/\/\/.*@/, "//***@");
 }
 
 let _kv: KvStore | null = null;
 
 /** Lazy singleton accessor. The first call picks the backend. */
 export function kv(): KvStore {
-  if (!_kv) _kv = resolveBackend();
+  if (!_kv) {
+    const { store, info } = selectBackend();
+    _kv = store;
+    _info = info;
+  }
   return _kv;
+}
+
+/**
+ * Which backend is ACTUALLY in use, and why.
+ *
+ * Every KV consumer fails open — a throw is logged and the caller
+ * proceeds — so a store that isn't working produces no failed request and
+ * no alert, just silently absent state. That makes "which backend am I
+ * really on" a question nothing could answer before this. Resolves the
+ * backend if it hasn't been resolved yet.
+ */
+export function describeKvBackend(): KvBackendInfo {
+  kv();
+  return _info!;
+}
+
+export type KvProbeResult =
+  | { ok: true; backend: EffectiveKvBackend; roundTripMs: number }
+  | { ok: false; backend: EffectiveKvBackend; error: string };
+
+/**
+ * Round-trip a canary key to prove the backend actually works.
+ *
+ * `describeKvBackend()` reports what was CONFIGURED; this reports whether
+ * it FUNCTIONS. The gap between the two is where the interesting failures
+ * live: DynamoKv builds a client without resolving credentials, so a
+ * missing IAM key or absent table looks perfectly healthy at startup and
+ * only fails at call time — by which point every caller has swallowed it.
+ *
+ * Writes a short-TTL key under a dedicated prefix and deletes it. Safe to
+ * run against production.
+ */
+export async function probeKv(): Promise<KvProbeResult> {
+  const info = describeKvBackend();
+  // Fixed key: a probe that raced with itself would still round-trip its
+  // own value, and a leftover on a crash expires within the TTL anyway.
+  const key = "kv:probe:canary";
+  const expected = `probe-${info.backend}`;
+  const started = Date.now();
+  try {
+    await kv().set(key, expected, 60);
+    const got = await kv().get(key);
+    if (got !== expected) {
+      return {
+        ok: false,
+        backend: info.backend,
+        error: `read-back mismatch: wrote ${JSON.stringify(expected)}, read ${JSON.stringify(got)}`,
+      };
+    }
+    await kv().delete(key);
+    return { ok: true, backend: info.backend, roundTripMs: Date.now() - started };
+  } catch (err) {
+    return {
+      ok: false,
+      backend: info.backend,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 /** Test-only: reset the singleton. Do not call in production code. */
 export function _resetKvForTests(): void {
   _kv = null;
+  _info = null;
 }
 
 /**
  * Test-only: inject a custom KV implementation (e.g. a stub that
  * throws, to exercise fail-open behavior). Do not call in production.
+ *
+ * @param info  Override the stamped backend info. Defaults to a
+ *              non-durable memory record, which is what most callers
+ *              want. Pass a durable one to exercise code that branches
+ *              on `durable` — /health?deep=1 returns 503 without it, so
+ *              the success path is otherwise unreachable in tests
+ *              without a real Upstash or DynamoDB.
  */
-export function _setKvForTests(store: KvStore): void {
+export function _setKvForTests(store: KvStore, info?: KvBackendInfo): void {
   _kv = store;
+  // Also stamp the info record. Without this, a test that injects a store
+  // and then calls describeKvBackend() would dereference a null `_info` —
+  // kv() short-circuits on the already-set `_kv` and never populates it.
+  _info = info ?? {
+    backend: "memory",
+    reason: "configured",
+    durable: false,
+    detail: "injected by _setKvForTests",
+  };
 }
 
 /** Test-only: expose MemoryKv for direct unit tests. */

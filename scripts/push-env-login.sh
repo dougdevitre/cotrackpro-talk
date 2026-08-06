@@ -57,6 +57,7 @@ MAP=(
 # streams to a host that can't serve it, and the per-number voice override
 # never applies. KV_URL/KV_TOKEN back SMS thread memory.
 OPTIONAL_MAP=(
+  "talk/server_domain:SERVER_DOMAIN"
   "talk/ws_domain:WS_DOMAIN"
   "voice/inbound_phone_map:INBOUND_PHONE_VOICE_MAP"
   "kv/url:KV_URL"

@@ -91,14 +91,29 @@ wire_twilio(){
 }
 
 # ── 3. Verify STOP suppression persisted to DynamoDB ─────────────────────────
+#
+# Dynamo-only by construction — Upstash keys aren't visible to the AWS
+# CLI. A failure here is NOT evidence that KV is broken, so it routes to
+# option 6 (which asks the deployed tier directly, whichever backend it
+# is) rather than dead-ending on "are you on dynamo?".
 check_stop(){
   c_b "Scanning DynamoDB cotrackpro-kv for suppression (sms:stop:*) rows…"
-  aws dynamodb scan --region "$REGION" --table-name cotrackpro-kv \
-    --filter-expression 'begins_with(pk, :p)' \
-    --expression-attribute-values '{":p":{"S":"sms:stop:"}}' \
-    --query 'Items[].pk' --output table 2>/dev/null \
-    || c_r "Scan failed — is KV_BACKEND=dynamo with table cotrackpro-kv? (Upstash users skip this.)"
-  c_y "Text STOP to your number first; a row here means the inbound webhook + durable KV work."
+  if aws dynamodb scan --region "$REGION" --table-name cotrackpro-kv \
+       --filter-expression 'begins_with(pk, :p)' \
+       --expression-attribute-values '{":p":{"S":"sms:stop:"}}' \
+       --query 'Items[].pk' --output table 2>/dev/null; then
+    c_y "Text STOP to your number first; a row here means the inbound webhook + durable KV work."
+  else
+    c_y "No dynamo table to scan — expected if you're on Upstash (the default)."
+    c_y "This check only sees the DynamoDB backend. To verify durable KV on"
+    c_y "whichever backend prod is actually running, use option 6."
+  fi
+}
+
+# ── 6. Durable KV setup + verification ───────────────────────────────────────
+kv_setup(){
+  EDGE_HOST="${EDGE_HOST:-}" STAGE="$STAGE" AWS_REGION="$REGION" \
+    bash "$(dirname "${BASH_SOURCE[0]}")/kv-setup.sh"
 }
 
 # ── 4. One-shot voice call test ───────────────────────────────────────────────
@@ -153,7 +168,8 @@ menu(){
   c_b "CoTrackPro talk-edge go-live — stage=$STAGE region=$REGION"
   echo "  1) Smoke test outbound SMS        4) Test one-shot voice call"
   echo "  2) Wire Twilio webhooks           5) Vercel env checklist (dashboard)"
-  echo "  3) Verify STOP row in DynamoDB    q) Quit"
+  echo "  3) Verify STOP row in DynamoDB    6) Set up durable KV (Upstash)"
+  echo "                                    q) Quit"
   read -rp "› " choice
   case "$choice" in
     1) smoke_sms;;
@@ -161,11 +177,13 @@ menu(){
     3) check_stop;;
     4) voice_test;;
     5) vercel_env;;
+    6) kv_setup;;
     q|Q) return 1;;
-    *) c_y "pick 1-5 or q";;
+    *) c_y "pick 1-6 or q";;
   esac
 }
 
-c_y "Tip: run option 5 first to confirm prod env is set, then 1 (SMS) → 2 (Twilio) → 3 (STOP) → 4 (voice)."
+c_y "Tip: 6 (durable KV) first — nothing else persists without it. Then 5 (env)"
+c_y "→ 1 (SMS) → 2 (Twilio) → 4 (voice)."
 while menu; do :; done
 c_g "Done. Re-run anytime — it's safe."

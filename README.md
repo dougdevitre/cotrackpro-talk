@@ -288,7 +288,8 @@ Then:
 | GET | `/records/by-role/:role` | List calls for a persona |
 | GET | `/records/by-status/:status` | List calls by status |
 | DELETE | `/records/:callSid` | Delete a call record |
-| GET | `/health` | Health check — returns tier + uptime |
+| GET | `/health` | Health check — tier, uptime, and the resolved KV backend. Always 200 |
+| GET | `/health?deep=1` | Adds a live KV round-trip; **503** if the backend isn't durable or the probe fails. Bearer-auth (the probe writes) |
 | GET | `/dashboard` | Minimal read-only admin UI (vanilla HTML/JS, Bearer-auth client-side) |
 | GET | `/api/cron/cost-rollup` | Daily cost rollup (Vercel Cron target; `CRON_SECRET` Bearer-auth) |
 

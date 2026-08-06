@@ -54,6 +54,8 @@ let lookupInboundPhone!: (
 let GREETINGS_ULAW!: Record<string, string[]>;
 let greetingKey!: (role: string, voiceId: string) => string;
 let getRoleGreeting!: (role: CoTrackProRole) => string;
+let describeKvBackend!: (typeof import("../src/services/kv.js"))["describeKvBackend"];
+let probeKv!: (typeof import("../src/services/kv.js"))["probeKv"];
 
 async function loadApp(): Promise<void> {
   ({ env } = await import("../src/config/env.js"));
@@ -61,6 +63,7 @@ async function loadApp(): Promise<void> {
   ({ lookupInboundPhone } = await import("../src/config/inboundPhoneMap.js"));
   ({ GREETINGS_ULAW, greetingKey } = await import("../src/audio/prerecorded.js"));
   ({ getRoleGreeting } = await import("../src/audio/greetings.js"));
+  ({ describeKvBackend, probeKv } = await import("../src/services/kv.js"));
 }
 
 // ── SSM hydration ─────────────────────────────────────────────────────────────
@@ -503,7 +506,7 @@ async function checkVoice(phone: string): Promise<void> {
 }
 
 /** Confirm the conversational brains are configured on both channels. */
-function checkConversational(): void {
+async function checkConversational(): Promise<void> {
   if (env.anthropicApiKey) {
     pass("Conversation / Anthropic", `model ${env.anthropicModel}`);
   } else {
@@ -522,13 +525,55 @@ function checkConversational(): void {
     );
   }
 
-  if (env.kvBackend === "memory" || (!env.kvUrl && env.kvBackend === "auto")) {
-    warn(
-      "Conversation / SMS thread memory",
-      "KV backend is in-memory. On Vercel each request may hit a different instance, so SMS threads will lose context between messages. Set KV_URL/KV_TOKEN (Upstash/Vercel KV) or KV_BACKEND=dynamo.",
+  // Ask the KV module which backend it ACTUALLY resolved, rather than
+  // re-deriving the rule here. The previous version of this check did
+  // re-derive it and got it wrong twice over: it missed KV_BACKEND=upstash
+  // with a missing token (which silently falls back to memory) and it
+  // missed a typo'd KV_BACKEND (same silent fallback), reporting a pass on
+  // a deployment that was really running in-process.
+  //
+  // SCOPE: this describes the process running THIS SCRIPT — env hydrated
+  // from SSM, or your local .env — not the deployed function. Once SSM
+  // has kv/url + kv/token, the check below goes green here even if Vercel
+  // is still serving a deployment that predates the env sync, because
+  // Vercel only applies env vars to NEW deployments. Asking the deployed
+  // tier is a different question, and `npm run kv:setup -- --verify-only`
+  // (GET /health?deep=1) is what answers it.
+  const LOCAL_SCOPE =
+    "This reflects the environment this script is running in, not the deployed tier — " +
+    "run `npm run kv:setup -- --verify-only` to ask production.";
+
+  const info = describeKvBackend();
+  if (!info.durable) {
+    const because =
+      info.reason === "fallback-missing-credentials" ||
+      info.reason === "fallback-unknown-backend"
+        ? `KV config is BROKEN and fell back to memory — ${info.detail}`
+        : `KV backend is in-memory (${info.detail})`;
+    fail(
+      "Durable state / KV backend",
+      `${because}. On Vercel each request may hit a different instance, so STOP opt-outs don't persist, dedupeKey doesn't dedupe, outbound voice lines are lost between the call and Twilio's audio fetch, and SMS threads lose context. Run \`npm run kv:setup\` to provision Upstash end to end, or set KV_BACKEND=dynamo. ${LOCAL_SCOPE}`,
+    );
+    return;
+  }
+
+  pass("Durable state / KV backend", `${info.backend} — ${info.detail}. ${LOCAL_SCOPE}`);
+
+  // Configured is not the same as working. DynamoKv in particular builds
+  // its client without resolving credentials, so a missing IAM key or an
+  // absent table looks healthy until the first real write — and every KV
+  // caller fails open, so that write is swallowed rather than surfaced.
+  const probe = await probeKv();
+  if (probe.ok) {
+    pass(
+      "Durable state / KV round-trip",
+      `set → get → delete against ${probe.backend} in ${probe.roundTripMs}ms`,
     );
   } else {
-    pass("Conversation / SMS thread memory", `KV backend: ${env.kvBackend}`);
+    fail(
+      "Durable state / KV round-trip",
+      `${probe.backend} is configured but NOT working: ${probe.error}. Every KV caller fails open, so this produces no failed requests — just silently missing state. ${LOCAL_SCOPE}`,
+    );
   }
 }
 
@@ -613,7 +658,26 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  await loadApp();
+  // env.ts validates at import and throws on the first missing required
+  // var. Catch it: a preflight tool that dies with a stack trace before
+  // checking anything is worse than useless, and the thing the operator
+  // needs to know is which var and where it comes from.
+  try {
+    await loadApp();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`\n${msg}`);
+    console.error(
+      useSsm
+        ? `\nSSM hydration didn't supply it. Check that the parameter exists:\n` +
+            `  ./scripts/ssm-params.sh check --stage ${stage}\n` +
+            `and that your AWS credentials can read /cotrackpro/${stage}/* ` +
+            `(aws sts get-caller-identity).`
+        : `\nYou passed --no-ssm, so only the ambient env and .env were used. ` +
+            `Drop --no-ssm to hydrate from /cotrackpro/${stage}/*.`,
+    );
+    process.exit(2);
+  }
 
   console.log(`\nPreflight for ${phone}`);
   console.log(`  API host: https://${env.apiDomain}`);
@@ -623,7 +687,7 @@ async function main(): Promise<void> {
   await checkApiHost();
   await checkWsHost();
   await checkVoice(phone);
-  checkConversational();
+  await checkConversational();
 
   render();
 
